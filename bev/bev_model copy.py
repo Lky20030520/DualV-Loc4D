@@ -20,8 +20,17 @@ if vggt_root and vggt_root not in sys.path: sys.path.append(vggt_root)
 # ==============================================================================
 # 1. 导入依赖
 # ==============================================================================
-from REIN import REIN
-from vggt.models.vggt import VGGT
+try:
+    from REIN import REIN
+except ImportError:
+    print("⚠️ 严重警告: 未找到 'REIN' 模块。")
+    REIN = None
+
+try:
+    from vggt.models.vggt import VGGT
+except ImportError:
+    print("⚠️ 严重警告: 未找到 'VGGT' 模块。")
+    VGGT = None
 
 # ==============================================================================
 # 2. 主模型
@@ -34,12 +43,13 @@ class FusionPlaceModel(nn.Module):
                  bev_dim=128,        
                  embed_dim=128,      
                  num_heads=4,
-                 freeze_backbones=False): 
+                 freeze_backbones=True): 
         super().__init__()
         
         # -------------------------------------------------------
         # A. Range 分支
         # -------------------------------------------------------
+        if VGGT is None: raise ValueError("缺失 VGGT 模块")
         print(f"🦕 [Init] Loading VGGT (Spatial-DINO)...")
         self.range_backbone = VGGT()
         
@@ -56,26 +66,15 @@ class FusionPlaceModel(nn.Module):
         # -------------------------------------------------------
         # B. BEV 分支 (REIN)
         # -------------------------------------------------------
+        if REIN is None: raise ValueError("缺失 REIN 模块")
         print(f"🏗️  [Init] Loading REIN (BEV)...")
         self.bev_backbone = REIN()
         
         if bev_path and os.path.exists(bev_path):
-                    ckpt = torch.load(bev_path, map_location="cpu", weights_only=False)
-                    if 'state_dict' in ckpt: ckpt = ckpt['state_dict']
-                    
-                    # --- 核心修复：鲁棒的前缀处理 ---
-                    new_state_dict = {}
-                    for k, v in ckpt.items():
-                        # 1. 尝试去掉 'module.' (多卡训练产生)
-                        name = k.replace('module.', '')
-                        # 2. 尝试去掉 'bev_backbone.' (之前的 Fusion 包装产生)
-                        name = name.replace('bev_backbone.', '')
-                        new_state_dict[name] = v
-
-                    msg = self.bev_backbone.load_state_dict(new_state_dict, strict=False)
-                    print(f"✅ BEV Weights Loaded: {bev_path}")
-                    if len(msg.missing_keys) > 0:
-                        print(f"ℹ️  注：BEV 部分缺失键 (如聚类中心): {msg.missing_keys[:3]}...")
+            ckpt = torch.load(bev_path, map_location="cpu", weights_only=False)
+            if 'state_dict' in ckpt: ckpt = ckpt['state_dict']
+            self.bev_backbone.load_state_dict(self._remove_prefix(ckpt), strict=False)
+            print(f"✅ BEV Weights Loaded: {bev_path}")
             
         self.bev_dim = bev_dim
 
@@ -104,6 +103,7 @@ class FusionPlaceModel(nn.Module):
         return {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
 
     def forward(self, bev_img, range_img):
+        # 原有的融合前向传播 (本次测试不使用，但保留以防报错)
         B = bev_img.shape[0]
         target_h, target_w = 70, 518
         if range_img.shape[-2:] != (target_h, target_w):
@@ -118,13 +118,14 @@ class FusionPlaceModel(nn.Module):
             
         kv = self.proj_range(range_feats)
 
-        bev_map, _ = self.bev_backbone.rem(bev_img)
+        with torch.no_grad():
+            bev_map, _ = self.bev_backbone.rem(bev_img)
             
         b, c, h, w = bev_map.shape
         query = bev_map.flatten(2).permute(0, 2, 1)
 
         attn_out, _ = self.cross_attn(query=query, key=kv, value=kv)
-        fused_seq = self.norm(query + 0*attn_out)
+        fused_seq = self.norm(query + attn_out)
 
         fused_map = fused_seq.permute(0, 2, 1).view(b, c, h, w)
         global_desc = self.bev_backbone.pooling(fused_map)
@@ -133,26 +134,20 @@ class FusionPlaceModel(nn.Module):
         return final_desc
 
     # ==========================================================================
-    # [修改] 适配 bev_main.py 的调用接口 (增加 return_all 参数)
+    # [新增] 仅用于 BEV-Only 消融实验
     # ==========================================================================
-    def forward_bev_only(self, bev_img, return_all=False):
+    def forward_bev_only(self, bev_img):
         """
         跳过 VGGT 和 Fusion 层，仅使用 REIN (BEV Backbone) 提取特征。
-        支持 return_all=True 以兼容训练循环的解包需求。
         """
-        # with torch.no_grad():
-        # 1. 提取特征图 (Local Features)
-        bev_map, _ = self.bev_backbone.rem(bev_img)
-        
-        # 2. Pooling (NetVLAD / GeM) -> Global Descriptor
-        global_desc = self.bev_backbone.pooling(bev_map)
-        
-        # 3. 归一化
-        final_desc = F.normalize(global_desc, p=2, dim=1)
+        with torch.no_grad():
+            # 1. 提取特征图
+            bev_map, _ = self.bev_backbone.rem(bev_img)
             
-        if return_all:
-            # 训练循环期望返回 3 个值: (local_feats, vlad_feats, global_desc)
-            # 我们这里为了兼容，前两个返回 bev_map 和 None
-            return bev_map, None, final_desc
+            # 2. Pooling (NetVLAD / GeM)
+            global_desc = self.bev_backbone.pooling(bev_map)
+            
+            # 3. 归一化
+            final_desc = F.normalize(global_desc, p=2, dim=1)
             
         return final_desc

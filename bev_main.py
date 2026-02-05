@@ -60,10 +60,6 @@ def get_args():
     parser.add_argument('--match_save_path', type=str, default='./fusion_match_results/')
     parser.add_argument('--sample_interval', type=int, default=10)
     parser.add_argument('--load_from', type=str, default='', help='恢复训练或测试的模型路径')
-    # 在 get_args() 函数内部添加
-    # parser.add_argument('--centroids_path', type=str, default='cache/fusion_integrated/centroids_init.hdf5', 
-    #                 help='预先保存的 NetVLAD 聚类中心路径')
-    
 
     opt = parser.parse_args()
     return opt
@@ -153,7 +149,6 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
                     # 由于 shuffle=False，通常不需要，但加个 list() 保险
                     indices_list = list(indices)
                     h5feat[indices_list, :] = res_np
-
         
         train_set.mining = True
         train_set.refreshCache()
@@ -168,22 +163,22 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
     # 这里的循环假设 Dataset 返回 (Query, Pos, Neg, Indices)
     # 这是一个关键点：你的 fusion_dataset.TrainingDataset 需要支持 Triplet 返回
     for iteration, (query, positives, negatives, indices) in enumerate(train_loader):
-        # 解包双模态数据
-        q_bev, q_range = query
-        p_bev, p_range = positives
-        n_bev, n_range = negatives # 确保数据加载器返回了 n_range
+
+        if isinstance(query, (list, tuple)): 
+            q_bev, _ = query
+            p_bev, _ = positives
+            n_bev, _ = negatives
+        else:
+            q_bev, p_bev, n_bev = query, positives, negatives
 
         B = q_bev.shape[0]
-        # 拼接数据以减少 Forward 次数
         input_bevs = torch.cat([q_bev, p_bev, n_bev]).to(device)
-        input_ranges = torch.cat([q_range, p_range, n_range]).to(device)
 
-        # 【关键修改】调用完整的融合 forward
-        _, _, global_descs = model(input_bevs, input_ranges, return_all=True)
+        # 前向传播 (BEV Only)
+        _, _, global_descs = model.forward_bev_only(input_bevs, return_all=True)
 
         # 分割特征
         global_descs_Q, global_descs_P, global_descs_N = torch.split(global_descs, [B, B, n_bev.shape[0]])
-    
 
         optimizer.zero_grad()
         loss = 0.0
@@ -195,8 +190,6 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
             loss += max_loss
         loss /= B
         loss.backward()
-        
-        
         optimizer.step()
 
         epoch_loss += loss.item()
@@ -211,13 +204,15 @@ def infer_fusion(eval_set, model, opt, device):
                         num_workers=opt.threads, collate_fn=ds_module.collate_fn_inference)
     
     all_global_descs = []
+    
     with torch.no_grad():
         for data, indices in tqdm(loader, desc="Inference"):
-            (bevs, ranges) = data # 这里的 ranges 不再是 None
-            bevs, ranges = bevs.to(device), ranges.to(device)
+            if data is None: continue
+            (bevs, ranges) = data
+            bevs = bevs.to(device)
             
-            # 【关键修改】使用完整融合路径
-            res = model(bevs, ranges)
+            # 使用 BEV Only
+            res = model.forward_bev_only(bevs)
             if isinstance(res, tuple): res = res[-1]
             # res = F.normalize(res, p=2, dim=1)
             all_global_descs.append(res.detach().cpu().numpy())
@@ -339,46 +334,36 @@ if __name__ == "__main__":
     )
     model = model.to(device)
     
-    # ==============================================================================
-    # [修改] 智能初始化逻辑
-    # ==============================================================================
+    # 如果指定了加载路径 (恢复训练或测试)
     if opt.mode == 'train':
             log_dir = join(opt.runsPath, f"fusion_{datetime.now().strftime('%b%d_%H-%M-%S')}")
             writer = SummaryWriter(log_dir=log_dir)
+            
+            # 1. 准备用于聚类的数据集 (FusionInferDataset)
+            # 只需要简单的图片列表，不需要三元组
+            cluster_dataset = ds_module.FusionInferDataset(
+                dataset_root=opt.dataset_root, 
+                seq=opt.train_seq,
+                sample_inteval=opt.sample_interval
+            )
 
+            # 2. 判断是否需要初始化聚类中心
+            # 如果没有指定 load_from，说明是从头训练，必须聚类
             if opt.load_from == '': 
-                # 优先尝试从本地读取已有的聚类中心
-                if exists(opt.centroids_path):
-                    print(f"✅ 检测到现有的聚类中心文件: {opt.centroids_path}，正在直接加载...")
-                    with h5py.File(opt.centroids_path, mode='r') as h5:
-                        centroids = h5.get("centroids")[...]
-                        # 注意：NetVLAD 初始化通常还需要特征描述符来计算 scale (b)
-                        # 如果你的 h5 文件里没存 descriptors，可以在 getClusters 存一下
-                        descriptors = h5.get("descriptors")[...] 
-                    print("🚀 聚类中心加载完毕。")
-                else:
-                    print(f"⚠️ 未找到聚类中心文件，正在从序列 {opt.train_seq} 重新聚类...")
-                    cluster_dataset = ds_module.FusionInferDataset(
-                        dataset_root=opt.dataset_root, 
-                        seq=opt.train_seq,
-                        sample_inteval=opt.sample_interval
-                    )
-                    centroids, descriptors = getClusters(cluster_dataset, opt, model, device)
-                    
-                    # [新增] 将聚类结果持久化保存，下次直接用
-                    if not exists(os.path.dirname(opt.centroids_path)): 
-                        makedirs(os.path.dirname(opt.centroids_path))
-                    with h5py.File(opt.centroids_path, mode='w') as h5:
-                        h5.create_dataset('centroids', data=centroids)
-                        h5.create_dataset('descriptors', data=descriptors)
-                    print(f"💾 聚类中心已保存至: {opt.centroids_path}")
-
-                # 统一应用聚类中心到模型
-                print("====> 正在更新 NetVLAD 权重...")
+                print("⚠️ 检测到从头训练 (Training from Scratch)... 正在初始化 NetVLAD 聚类中心")
+                
+                # 调用刚才定义的函数
+                centroids, descriptors = getClusters(cluster_dataset, opt, model, device)
+                
+                # 将聚类中心赋值给模型
+                print("====> 更新模型参数 (NetVLAD Centroids)...")
+                # 路径: FusionPlaceModel -> bev_backbone (REIN) -> pooling (NetVLAD)
                 model.bev_backbone.pooling.init_params(centroids, descriptors)
-                model = model.to(device) 
+                
+                model = model.to(device) # 确保参数回传 GPU
+                print("✅ NetVLAD 初始化完成。")
             else:
-                print("✅ 已从 checkpoint 加载权重，跳过 NetVLAD 初始化。")
+                print("✅ 检测到已加载预训练模型，跳过 K-Means 聚类初始化。")
 
             # 3. 加载正式训练集 (FusionTrainingDataset)
             # 这才是后面 train_epoch 用到的

@@ -201,7 +201,6 @@ class FusionInferDataset(data.Dataset):
             # 3. 读取彩色 BEV 图片 (3通道)
             # 使用 cv2.IMREAD_COLOR 确保读入 R, G, B 信息
             img = cv2.imread(bev_path, cv2.IMREAD_COLOR) 
-            #img = np.clip(img.astype(np.float32) * 2.0, 0, 255).astype(np.uint8)
             
             if img is None:
                 raise FileNotFoundError(f"无法读取图像: {bev_path}")
@@ -216,7 +215,7 @@ class FusionInferDataset(data.Dataset):
             # 这样就得到了 3 通道的 BEV Tensor (强度, 高度, 多普勒)
             bev_tensor = torch.from_numpy(img).permute(2, 0, 1)
             
-            # # 确保使用了文件头部的全局变量 BEV_TF
+            # 确保使用了文件头部的全局变量 BEV_TF
             if BEV_TF is not None:
                 bev_tensor = BEV_TF(bev_tensor)
             
@@ -469,33 +468,8 @@ def evaluateResults(seq, global_descs, local_feats, dataset, match_results_save_
     all_errs = []
 
     if is_list_style:
-            faiss_index.add(db_descs)
-            _, predictions = faiss_index.search(q_descs, 1)
-            
-            print("\n" + "="*40)
-            print("===== 原始匹配深度分析 (前 10 帧) =====")
-            
-            # 提取 DB 的位姿子集供参考
-            db_poses_subset = dataset.poses[:dataset.db_split_index]
-            
-            for i in range(min(10, len(predictions))):
-                q_idx = i
-                pred_db_idx = predictions[q_idx][0]
-                
-                # 【关键修正】从 dataset.poses 中正确索引 Query 位姿
-                # Query 的真实索引 = 当前索引 + 数据库长度
-                q_global_idx = q_idx + dataset.db_split_index
-                q_pose = dataset.poses[q_global_idx, [3, 7, 11]]
-                
-                # 从数据库位姿子集中提取匹配到的位姿
-                db_pose = db_poses_subset[pred_db_idx, [3, 7, 11]]
-                
-                # 计算物理距离
-                dist = np.sqrt(np.sum((q_pose - db_pose)**2))
-                
-                print(f"Query {q_idx} (全局Idx:{q_global_idx}) -> 匹配到 DB {pred_db_idx}")
-                print(f"  > 实际物理距离: {dist:.4f} 米")
-            print("="*40 + "\n")
+        faiss_index.add(db_descs)
+        _, predictions = faiss_index.search(q_descs, 1)
     else:
         raise NotImplementedError("非list/tuple模式")
 
@@ -536,7 +510,6 @@ def evaluateResults(seq, global_descs, local_feats, dataset, match_results_save_
             print(f"Query {q_idx} - 检索结果是否为正样本: {is_tp}")
 
     recall_top1 = tp / all_positives if all_positives > 0 else 0.0
-    # print(f"前 10 个 Query 匹配到的 DB 索引分别是: {predictions[:500].flatten()}")
     print(f"\n===== 评估结果 =====")
     print(f"Recall@1: {recall_top1:.4f} ({recall_top1*100:.2f}%)")
 

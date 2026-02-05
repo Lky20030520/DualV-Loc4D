@@ -8,27 +8,19 @@ import h5py
 import faiss
 from torchvision import transforms
 import cv2 
-import torchvision.transforms.functional as TF
-import random
 
 # ================= 配置区域 =================
 
 def get_transforms():
-    bev_tf = transforms.Compose([
-        transforms.Resize((256, 256)),  # <-- 核心修改：强制缩放到 256x256
-        # 注意：这里不需要 ToTensor 或 Normalize，因为我们在 __getitem__ 里已经手动做了
-    ])
-    
-    
     # Range 图保持不变
     range_tf = transforms.Compose([
         transforms.Resize((70, 518)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    return bev_tf, range_tf 
+    return None, range_tf 
 
-BEV_TF, RANGE_TF = get_transforms()
+_, RANGE_TF = get_transforms()
 
 def extract_timestamp(filename):
     """从文件名提取时间戳 (鲁棒版)"""
@@ -169,74 +161,62 @@ class FusionInferDataset(data.Dataset):
 
         return np.array(poses, dtype=np.float32)
 
-    # def __getitem__(self, index):
-    #     item = self.pairs[index]
-        
-    #     # [修改 3] 保持 Recall 53% 的 CV2 灰度读取逻辑
-    #     bev_img_cv = cv2.imread(item['bev'], 0) # 读取灰度
-        
-    #     if bev_img_cv is None:
-    #          raise FileNotFoundError(f"无法读取图像: {item['bev']}")
-
-    #     # 归一化 (0-1)
-    #     bev_img_cv = (bev_img_cv.astype(np.float32)) / 255.0
-        
-    #     # 扩展通道 [1, H, W] -> [3, H, W]
-    #     bev_tensor = torch.from_numpy(bev_img_cv[np.newaxis, :, :].repeat(3, 0))
-        
-    #     # Range 图处理
-    #     range_img = Image.open(item['range']).convert('RGB')
-    #     range_tensor = RANGE_TF(range_img)
-        
-    #     return bev_tensor, range_tensor, index
-    
-    
     def __getitem__(self, index):
-            # 1. 获取数据项 (注意：FusionDataset 使用 self.pairs 字典列表)
-            item = self.pairs[index]
-            
-            # 2. 获取 BEV 图片路径
-            bev_path = item['bev']
-            
-            # 3. 读取彩色 BEV 图片 (3通道)
-            # 使用 cv2.IMREAD_COLOR 确保读入 R, G, B 信息
-            img = cv2.imread(bev_path, cv2.IMREAD_COLOR) 
-            #img = np.clip(img.astype(np.float32) * 2.0, 0, 255).astype(np.uint8)
-            
-            if img is None:
-                raise FileNotFoundError(f"无法读取图像: {bev_path}")
+        item = self.pairs[index]
+        
+        # [修改 3] 保持 Recall 53% 的 CV2 灰度读取逻辑
+        bev_img_cv = cv2.imread(item['bev'], 0) # 读取灰度
+        
+        if bev_img_cv is None:
+             raise FileNotFoundError(f"无法读取图像: {item['bev']}")
 
-            # 4. BGR 转 RGB (OpenCV 默认是 BGR)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # 归一化 (0-1)
+        bev_img_cv = (bev_img_cv.astype(np.float32)) / 255.0
+        
+        # 扩展通道 [1, H, W] -> [3, H, W]
+        bev_tensor = torch.from_numpy(bev_img_cv[np.newaxis, :, :].repeat(3, 0))
+        
+        # Range 图处理
+        range_img = Image.open(item['range']).convert('RGB')
+        range_tensor = RANGE_TF(range_img)
+        
+        return bev_tensor, range_tensor, index
+    
+    
+    # def __getitem__(self, index):
+    #     img_path = self.imgs_path[index]
+        
+    #     # 1. 读取彩色图片 (3通道)
+    #     # flag=1 (cv2.IMREAD_COLOR) 确保读取 R, G, B 三个通道
+    #     img = cv2.imread(img_path, cv2.IMREAD_COLOR) 
+        
+    #     if img is None:
+    #         raise FileNotFoundError(f"无法读取图像: {img_path}")
 
-            # 5. 归一化 (0-255 -> 0.0-1.0)
-            img = img.astype(np.float32) / 255.0
-            
-            # 6. 调整维度: [H, W, 3] -> [3, H, W]
-            # 这样就得到了 3 通道的 BEV Tensor (强度, 高度, 多普勒)
-            bev_tensor = torch.from_numpy(img).permute(2, 0, 1)
-            
-            # # 确保使用了文件头部的全局变量 BEV_TF
-            if BEV_TF is not None:
-                bev_tensor = BEV_TF(bev_tensor)
-            
-            # =======================================================
-            # 7. 处理 Range 图 (必须保留！否则 infer_fusion 会解包失败)
-            # =======================================================
-            range_img = Image.open(item['range']).convert('RGB')
-            range_tensor = RANGE_TF(range_img)
-            
-            return bev_tensor, range_tensor, index
+    #     # 2. BGR 转 RGB
+    #     # OpenCV 默认读入是 BGR，虽然作为特征输入顺序可能不关键，
+    #     # 但转为 RGB 是个好习惯，尤其是如果你使用了预训练权重。
+    #     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    #     # 3. 归一化 (0-255 -> 0.0-1.0)
+    #     img = img.astype(np.float32) / 255.0
+        
+    #     # 4. 调整维度顺序
+    #     # OpenCV/Numpy: [H, W, C] (例如 512, 512, 3)
+    #     # PyTorch 要求: [C, H, W] (例如 3, 512, 512)
+    #     img_tensor = torch.from_numpy(img).permute(2, 0, 1)
+        
+    #     return img_tensor, index
 
     def __len__(self):
         return len(self.pairs)
 
 
 class FusionTrainingDataset(data.Dataset):
-    def __init__(self, dataset_root='datasets/snail', seq='radar', max_frames=10000, cache_path=None, sample_inteval=1):
+    def __init__(self, dataset_root='datasets/snail', seq='radar', max_frames=10000, cache_path=None):
         super().__init__()
         # 复用上面的 InferDataset
-        self.base_dataset = FusionInferDataset(seq, dataset_root, sample_inteval=sample_inteval)
+        self.base_dataset = FusionInferDataset(seq, dataset_root, sample_inteval=1)
         
         if len(self.base_dataset) > max_frames:
              self.base_dataset.pairs = self.base_dataset.pairs[:max_frames]
@@ -276,47 +256,11 @@ class FusionTrainingDataset(data.Dataset):
         with h5py.File(self.cache, 'r') as h5:
             self.h5feat = np.array(h5.get("features"))
 
-    ## 无旋转版本
-    # def __getitem__(self, index):
-    #     if self.mining and self.h5feat is not None:
-    #         q_feat = self.h5feat[index]
-    #         pos_idx = np.random.choice(self.positives[index])
-            
-    #         neg_candidates = self.negatives[index]
-    #         if len(neg_candidates) > 0:
-    #             subset = np.random.choice(neg_candidates, min(len(neg_candidates), 1000))
-    #             neg_feats = self.h5feat[subset]
-    #             feat_dists = np.linalg.norm(neg_feats - q_feat, axis=1)
-    #             hardest_idx = np.argsort(feat_dists)[:self.num_neg]
-    #             neg_indices = subset[hardest_idx]
-    #         else:
-    #             neg_indices = np.random.choice(range(len(self.poses)), self.num_neg)
-    #     else:
-    #         pos_idx = np.random.choice(self.positives[index])
-    #         neg_indices = np.random.choice(self.negatives[index], self.num_neg)
-
-    #     q_bev, q_range, _ = self.base_dataset[index]
-    #     p_bev, p_range, _ = self.base_dataset[pos_idx]
-        
-    #     n_bevs, n_ranges = [], []
-    #     for ni in neg_indices:
-    #         nb, nr, _ = self.base_dataset[ni]
-    #         n_bevs.append(nb)
-    #         n_ranges.append(nr)
-            
-    #     n_bevs = torch.stack(n_bevs)
-    #     n_ranges = torch.stack(n_ranges)
-        
-    #     return (q_bev, q_range), (p_bev, p_range), (n_bevs, n_ranges), index
-    
-    
-    
-    ## 旋转版本
     def __getitem__(self, index):
-        # 1. 确定正负样本索引 (保持不变)
         if self.mining and self.h5feat is not None:
             q_feat = self.h5feat[index]
             pos_idx = np.random.choice(self.positives[index])
+            
             neg_candidates = self.negatives[index]
             if len(neg_candidates) > 0:
                 subset = np.random.choice(neg_candidates, min(len(neg_candidates), 1000))
@@ -330,67 +274,44 @@ class FusionTrainingDataset(data.Dataset):
             pos_idx = np.random.choice(self.positives[index])
             neg_indices = np.random.choice(self.negatives[index], self.num_neg)
 
-        # =========================================================
-        # 2. 读取数据并加入 [随机旋转增强]
-        # =========================================================
-        
-        # --- 处理 Query ---
         q_bev, q_range, _ = self.base_dataset[index]
-        # [新增增强] 随机旋转 0-360 度
-        # 注意: 这里只旋转 BEV，Range 暂时不动
-        angle_q = random.uniform(0, 360) 
-        q_bev = TF.rotate(q_bev, angle_q) 
-
-        # --- 处理 Positive ---
         p_bev, p_range, _ = self.base_dataset[pos_idx]
-        # [新增增强]
-        angle_p = random.uniform(0, 360)
-        p_bev = TF.rotate(p_bev, angle_p)
-
-        # --- 处理 Negatives ---
+        
         n_bevs, n_ranges = [], []
         for ni in neg_indices:
             nb, nr, _ = self.base_dataset[ni]
-            
-            # [新增增强] 每个负样本也随机旋转
-            angle_n = random.uniform(0, 360)
-            nb = TF.rotate(nb, angle_n)
-            
             n_bevs.append(nb)
             n_ranges.append(nr)
             
         n_bevs = torch.stack(n_bevs)
         n_ranges = torch.stack(n_ranges)
         
-        # 返回打包好的数据
         return (q_bev, q_range), (p_bev, p_range), (n_bevs, n_ranges), index
-    
-    
 
     def __len__(self):
         return len(self.poses)
 
 # ================= 工具函数 =================
 
-# def fusion_collate_fn(batch):
-#     batch = list(filter(lambda x: x is not None, batch))
-#     if len(batch) == 0: return None
+def fusion_collate_fn(batch):
+    batch = list(filter(lambda x: x is not None, batch))
+    if len(batch) == 0: return None
     
-#     queries, positives, negatives, indices = zip(*batch)
+    queries, positives, negatives, indices = zip(*batch)
     
-#     q_bevs = torch.stack([x[0] for x in queries])
-#     q_ranges = torch.stack([x[1] for x in queries])
+    q_bevs = torch.stack([x[0] for x in queries])
+    q_ranges = torch.stack([x[1] for x in queries])
     
-#     p_bevs = torch.stack([x[0] for x in positives])
-#     p_ranges = torch.stack([x[1] for x in positives])
+    p_bevs = torch.stack([x[0] for x in positives])
+    p_ranges = torch.stack([x[1] for x in positives])
     
-#     n_bevs = torch.cat([x[0] for x in negatives])
-#     n_ranges = torch.cat([x[1] for x in negatives])
+    n_bevs = torch.cat([x[0] for x in negatives])
+    n_ranges = torch.cat([x[1] for x in negatives])
     
-#     all_bevs = torch.cat([q_bevs, p_bevs, n_bevs], dim=0)
-#     all_ranges = torch.cat([q_ranges, p_ranges, n_ranges], dim=0)
+    all_bevs = torch.cat([q_bevs, p_bevs, n_bevs], dim=0)
+    all_ranges = torch.cat([q_ranges, p_ranges, n_ranges], dim=0)
     
-#     return all_bevs, all_ranges, indices
+    return all_bevs, all_ranges, indices
 
 def collate_fn_inference(batch):
     batch = list(filter(lambda x: x is not None, batch))
@@ -410,41 +331,6 @@ def collate_fn_inference(batch):
         return bevs, list(indices)
     else:
         raise ValueError(f"collate_fn_inference 收到异常数据长度: {len(data_tuple)}")
-    
-# ==========================================
-#  请将此函数添加到 bev_dataset.py 的最末尾
-#  (注意缩进，它应该是一个顶层函数，不属于任何类)
-# ==========================================
-
-def collate_fn(batch):
-    """
-    处理 FusionTrainingDataset 的 batch 数据
-    将 [(q, p, n, idx), ...] 这种列表结构
-    打包成 ((q_bev, q_range), (p_bev, p_range), (n_bevs, n_ranges), indices)
-    """
-    # 1. 过滤掉读取失败的数据 (None)
-    batch = list(filter(lambda x: x is not None, batch))
-    if len(batch) == 0: return None, None, None, None
-    
-    # 2. 解包 batch 中的四项 (Query, Positive, Negatives, Index)
-    # dataset.__getitem__ 返回的是: (q_bev, q_range), (p_bev, p_range), (n_bevs, n_ranges), index
-    queries, positives, negatives, indices = zip(*batch)
-    
-    # 3. 堆叠 Query (BEV, Range)
-    q_bevs = torch.stack([x[0] for x in queries])
-    q_ranges = torch.stack([x[1] for x in queries])
-    
-    # 4. 堆叠 Positive (BEV, Range)
-    p_bevs = torch.stack([x[0] for x in positives])
-    p_ranges = torch.stack([x[1] for x in positives])
-    
-    # 5. 堆叠 Negatives
-    # 注意：每个样本有多个负样本，所以这里用 cat 把它们串起来
-    n_bevs = torch.cat([x[0] for x in negatives])
-    n_ranges = torch.cat([x[1] for x in negatives])
-    
-    # 6. 返回打包好的 4 个元素，对应 train_epoch 中的解包顺序
-    return (q_bevs, q_ranges), (p_bevs, p_ranges), (n_bevs, n_ranges), list(indices)
 
 # ================= 评估函数 =================
 def evaluateResults(seq, global_descs, local_feats, dataset, match_results_save_path=None):
@@ -469,33 +355,8 @@ def evaluateResults(seq, global_descs, local_feats, dataset, match_results_save_
     all_errs = []
 
     if is_list_style:
-            faiss_index.add(db_descs)
-            _, predictions = faiss_index.search(q_descs, 1)
-            
-            print("\n" + "="*40)
-            print("===== 原始匹配深度分析 (前 10 帧) =====")
-            
-            # 提取 DB 的位姿子集供参考
-            db_poses_subset = dataset.poses[:dataset.db_split_index]
-            
-            for i in range(min(10, len(predictions))):
-                q_idx = i
-                pred_db_idx = predictions[q_idx][0]
-                
-                # 【关键修正】从 dataset.poses 中正确索引 Query 位姿
-                # Query 的真实索引 = 当前索引 + 数据库长度
-                q_global_idx = q_idx + dataset.db_split_index
-                q_pose = dataset.poses[q_global_idx, [3, 7, 11]]
-                
-                # 从数据库位姿子集中提取匹配到的位姿
-                db_pose = db_poses_subset[pred_db_idx, [3, 7, 11]]
-                
-                # 计算物理距离
-                dist = np.sqrt(np.sum((q_pose - db_pose)**2))
-                
-                print(f"Query {q_idx} (全局Idx:{q_global_idx}) -> 匹配到 DB {pred_db_idx}")
-                print(f"  > 实际物理距离: {dist:.4f} 米")
-            print("="*40 + "\n")
+        faiss_index.add(db_descs)
+        _, predictions = faiss_index.search(q_descs, 1)
     else:
         raise NotImplementedError("非list/tuple模式")
 
@@ -536,7 +397,6 @@ def evaluateResults(seq, global_descs, local_feats, dataset, match_results_save_
             print(f"Query {q_idx} - 检索结果是否为正样本: {is_tp}")
 
     recall_top1 = tp / all_positives if all_positives > 0 else 0.0
-    # print(f"前 10 个 Query 匹配到的 DB 索引分别是: {predictions[:500].flatten()}")
     print(f"\n===== 评估结果 =====")
     print(f"Recall@1: {recall_top1:.4f} ({recall_top1*100:.2f}%)")
 

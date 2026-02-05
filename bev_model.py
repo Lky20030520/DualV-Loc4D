@@ -60,22 +60,13 @@ class FusionPlaceModel(nn.Module):
         self.bev_backbone = REIN()
         
         if bev_path and os.path.exists(bev_path):
-                    ckpt = torch.load(bev_path, map_location="cpu", weights_only=False)
-                    if 'state_dict' in ckpt: ckpt = ckpt['state_dict']
-                    
-                    # --- 核心修复：鲁棒的前缀处理 ---
-                    new_state_dict = {}
-                    for k, v in ckpt.items():
-                        # 1. 尝试去掉 'module.' (多卡训练产生)
-                        name = k.replace('module.', '')
-                        # 2. 尝试去掉 'bev_backbone.' (之前的 Fusion 包装产生)
-                        name = name.replace('bev_backbone.', '')
-                        new_state_dict[name] = v
-
-                    msg = self.bev_backbone.load_state_dict(new_state_dict, strict=False)
-                    print(f"✅ BEV Weights Loaded: {bev_path}")
-                    if len(msg.missing_keys) > 0:
-                        print(f"ℹ️  注：BEV 部分缺失键 (如聚类中心): {msg.missing_keys[:3]}...")
+            ckpt = torch.load(bev_path, map_location="cpu", weights_only=False)
+            if 'state_dict' in ckpt: 
+                ckpt = ckpt['state_dict']
+                bev_sd = {k.replace('bev_backbone.', ''): v for k, v in ckpt.items() if k.startswith('bev_backbone.')}
+                self.bev_backbone.load_state_dict(bev_sd, strict=True) # 建议设为 True 检查是否对齐
+            # self.bev_backbone.load_state_dict(self._remove_prefix(ckpt), strict=False)
+            print(f"✅ BEV Weights Loaded: {bev_path}")
             
         self.bev_dim = bev_dim
 
@@ -104,6 +95,7 @@ class FusionPlaceModel(nn.Module):
         return {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
 
     def forward(self, bev_img, range_img):
+        # 原有的融合前向传播 (本次测试不使用，但保留以防报错)
         B = bev_img.shape[0]
         target_h, target_w = 70, 518
         if range_img.shape[-2:] != (target_h, target_w):
@@ -118,13 +110,14 @@ class FusionPlaceModel(nn.Module):
             
         kv = self.proj_range(range_feats)
 
-        bev_map, _ = self.bev_backbone.rem(bev_img)
+        with torch.no_grad():
+            bev_map, _ = self.bev_backbone.rem(bev_img)
             
         b, c, h, w = bev_map.shape
         query = bev_map.flatten(2).permute(0, 2, 1)
 
         attn_out, _ = self.cross_attn(query=query, key=kv, value=kv)
-        fused_seq = self.norm(query + 0*attn_out)
+        fused_seq = self.norm(query + attn_out)
 
         fused_map = fused_seq.permute(0, 2, 1).view(b, c, h, w)
         global_desc = self.bev_backbone.pooling(fused_map)
