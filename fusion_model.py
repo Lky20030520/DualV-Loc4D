@@ -98,6 +98,8 @@ class FusionPlaceModel(nn.Module):
             num_heads=num_heads, 
             batch_first=True
         )
+        self.norm_bev_pre = nn.LayerNorm(self.bev_dim)
+        self.norm_range_pre = nn.LayerNorm(self.bev_dim)
         self.norm = nn.LayerNorm(self.bev_dim)
 
     def _remove_prefix(self, state_dict):
@@ -122,9 +124,12 @@ class FusionPlaceModel(nn.Module):
             
         b, c, h, w = bev_map.shape
         query = bev_map.flatten(2).permute(0, 2, 1)
+        
+        query_norm = self.norm_bev_pre(query)
+        kv_norm = self.norm_range_pre(kv)
 
-        attn_out, _ = self.cross_attn(query=query, key=kv, value=kv)
-        fused_seq = self.norm(query + 0*attn_out)
+        attn_out, _ = self.cross_attn(query=query_norm, key=kv_norm, value=kv_norm)
+        fused_seq = self.norm(query_norm + attn_out)
 
         fused_map = fused_seq.permute(0, 2, 1).view(b, c, h, w)
         global_desc = self.bev_backbone.pooling(fused_map)

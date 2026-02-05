@@ -58,11 +58,11 @@ def get_args():
     parser.add_argument('--runsPath', type=str, default='./runs/')
     parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated1/')
     parser.add_argument('--match_save_path', type=str, default='./fusion_match_results/')
-    parser.add_argument('--sample_interval', type=int, default=10)
+    parser.add_argument('--sample_interval', type=int, default=30)
     parser.add_argument('--load_from', type=str, default='', help='恢复训练或测试的模型路径')
     # 在 get_args() 函数内部添加
-    # parser.add_argument('--centroids_path', type=str, default='cache/fusion_integrated/centroids_init.hdf5', 
-    #                 help='预先保存的 NetVLAD 聚类中心路径')
+    parser.add_argument('--centroids_path', type=str, default='cache/fusion_integrated/centroids_init.hdf5', 
+                    help='预先保存的 NetVLAD 聚类中心路径')
     
 
     opt = parser.parse_args()
@@ -179,7 +179,7 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
         input_ranges = torch.cat([q_range, p_range, n_range]).to(device)
 
         # 【关键修改】调用完整的融合 forward
-        _, _, global_descs = model(input_bevs, input_ranges, return_all=True)
+        global_descs = model(input_bevs, input_ranges)
 
         # 分割特征
         global_descs_Q, global_descs_P, global_descs_N = torch.split(global_descs, [B, B, n_bev.shape[0]])
