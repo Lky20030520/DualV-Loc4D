@@ -22,11 +22,31 @@ def get_transforms():
     
     # Range 图保持不变
     range_tf = transforms.Compose([
-        transforms.Resize((70, 518)),
+        transforms.Resize((70, 518)),# interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     return bev_tf, range_tf 
+
+
+# 在 get_transforms 中添加 normalize 定义
+# def get_transforms():
+#     # 定义通用的 normalize
+#     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+#                                      std=[0.229, 0.224, 0.225])
+
+#     bev_tf = transforms.Compose([
+#         transforms.Resize((256, 256)),
+#         # 注意：transforms.Normalize 期望输入是 Tensor，所以放在 Resize 后
+#         normalize 
+#     ])
+
+#     range_tf = transforms.Compose([
+#         transforms.Resize((70, 518)),
+#         transforms.ToTensor(),
+#         normalize
+#     ])
+#     return bev_tf, range_tf
 
 BEV_TF, RANGE_TF = get_transforms()
 
@@ -168,27 +188,6 @@ class FusionInferDataset(data.Dataset):
                 poses.append(np.zeros(12))
 
         return np.array(poses, dtype=np.float32)
-
-    # def __getitem__(self, index):
-    #     item = self.pairs[index]
-        
-    #     # [修改 3] 保持 Recall 53% 的 CV2 灰度读取逻辑
-    #     bev_img_cv = cv2.imread(item['bev'], 0) # 读取灰度
-        
-    #     if bev_img_cv is None:
-    #          raise FileNotFoundError(f"无法读取图像: {item['bev']}")
-
-    #     # 归一化 (0-1)
-    #     bev_img_cv = (bev_img_cv.astype(np.float32)) / 255.0
-        
-    #     # 扩展通道 [1, H, W] -> [3, H, W]
-    #     bev_tensor = torch.from_numpy(bev_img_cv[np.newaxis, :, :].repeat(3, 0))
-        
-    #     # Range 图处理
-    #     range_img = Image.open(item['range']).convert('RGB')
-    #     range_tensor = RANGE_TF(range_img)
-        
-    #     return bev_tensor, range_tensor, index
     
     
     def __getitem__(self, index):
@@ -334,28 +333,43 @@ class FusionTrainingDataset(data.Dataset):
         # 2. 读取数据并加入 [随机旋转增强]
         # =========================================================
         
+        # 定义一个辅助函数：同步处理 BEV 和 Range
+        def load_and_augment(idx):
+            # A. 读取基础数据
+            bev, range_tensor, _ = self.base_dataset[idx]
+            
+            # B. 生成随机角度 (0 ~ 360)
+            angle = random.uniform(-30, 30)
+            
+            # C. 旋转 BEV (几何旋转)
+            # BEV 是 [3, H, W]
+            bev_rotated = TF.rotate(bev, angle)
+            
+            # D. 平移 Range (循环滚动)
+            # Range 是 [C, H, W]，宽 W 对应 360度
+            # 计算需要移动多少个像素
+            c, h, w = range_tensor.shape
+            shift_ratio = angle / 360.0
+            # 注意方向：通常 BEV 逆时针转，全景图需要向某一侧滚动
+            # 这里假设顺时针滚动，具体正负可能需要根据雷达厂商定义微调，通常负号对齐
+            pixel_shift = int(w * shift_ratio)
+            
+            # 使用 torch.roll 实现循环移位
+            # dims=-1 表示在宽度方向 (W) 滚动
+            range_shifted = torch.roll(range_tensor, shifts=int(w * shift_ratio), dims=-1)
+            
+            return bev_rotated, range_shifted
+
         # --- 处理 Query ---
-        q_bev, q_range, _ = self.base_dataset[index]
-        # [新增增强] 随机旋转 0-360 度
-        # 注意: 这里只旋转 BEV，Range 暂时不动
-        angle_q = random.uniform(0, 360) 
-        q_bev = TF.rotate(q_bev, angle_q) 
+        q_bev, q_range = load_and_augment(index)
 
         # --- 处理 Positive ---
-        p_bev, p_range, _ = self.base_dataset[pos_idx]
-        # [新增增强]
-        angle_p = random.uniform(0, 360)
-        p_bev = TF.rotate(p_bev, angle_p)
+        p_bev, p_range = load_and_augment(pos_idx)
 
         # --- 处理 Negatives ---
         n_bevs, n_ranges = [], []
         for ni in neg_indices:
-            nb, nr, _ = self.base_dataset[ni]
-            
-            # [新增增强] 每个负样本也随机旋转
-            angle_n = random.uniform(0, 360)
-            nb = TF.rotate(nb, angle_n)
-            
+            nb, nr = load_and_augment(ni)
             n_bevs.append(nb)
             n_ranges.append(nr)
             

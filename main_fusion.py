@@ -41,11 +41,16 @@ def get_args():
     # 模型参数 (保留代码1的设置)
     parser.add_argument('--vggt_path', type=str, default='runs/vggt_model/vggtmodel.pt')
     parser.add_argument('--bev_path', type=str, default='runs/fusion_Jan29_19-29-33/model_best.pth.tar')
+    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb09_16-16-36/model_best.pth.tar', help='恢复训练或测试的模型路径')
+    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated/')
+    parser.add_argument('--match_save_path', type=str, default='./fusion_match_results/')
+    parser.add_argument('--runsPath', type=str, default='./runs/')
+    parser.add_argument('--sample_interval', type=int, default=30)
     parser.add_argument('--range_dim', type=int, default=2048)
     
     # 训练参数 (来自代码2)
     parser.add_argument('--batchSize', type=int, default=1, help='训练批量') 
-    parser.add_argument('--cacheBatchSize', type=int, default=16, help='缓存/推理批量')
+    parser.add_argument('--cacheBatchSize', type=int, default=4, help='缓存/推理批量')
     parser.add_argument('--nEpochs', type=int, default=20, help='训练轮数')
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--lrStep', type=float, default=5)
@@ -53,17 +58,6 @@ def get_args():
     parser.add_argument('--weightDecay', type=float, default=0.001)
     parser.add_argument('--threads', type=int, default=0)
     parser.add_argument('--seed', type=int, default=1024)
-    
-    # 路径参数
-    parser.add_argument('--runsPath', type=str, default='./runs/')
-    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated1/')
-    parser.add_argument('--match_save_path', type=str, default='./fusion_match_results/')
-    parser.add_argument('--sample_interval', type=int, default=30)
-    parser.add_argument('--load_from', type=str, default='', help='恢复训练或测试的模型路径')
-    # 在 get_args() 函数内部添加
-    parser.add_argument('--centroids_path', type=str, default='cache/fusion_integrated/centroids_init.hdf5', 
-                    help='预先保存的 NetVLAD 聚类中心路径')
-    
 
     opt = parser.parse_args()
     return opt
@@ -100,7 +94,7 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
     if not exists(opt.cachePath): makedirs(opt.cachePath)
 
     # === Hard Mining Cache 构建 (来自代码2) ===
-    if epoch >= 0: # 可以设置晚一点开启 Hard Mining
+    if epoch >= 5: # 可以设置晚一点开启 Hard Mining
         print(f'====> Epoch {epoch}: 构建硬样本挖掘特征缓存')
         train_set.mining = False 
         train_set.cache = join(opt.cachePath, 'desc_cen_hardmining.hdf5')
@@ -124,14 +118,13 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
                 for iteration, (data, indices) in enumerate(tqdm(train_loader, desc="Caching"), 1):
                     # --- 数据解包 ---
                     if isinstance(data, (tuple, list)):
-                        bevs = data[0] # 取 BEV
-                    else:
-                        bevs = data
+                        bevs, ranges = data # 取 BEV 和 Range
+
                     bevs = bevs.to(device)
+                    ranges = ranges.to(device)
 
                     # --- 提取特征 ---
-                    # 使用 forward_bev_only，只跑 BEV 分支
-                    res = model.forward_bev_only(bevs)
+                    res = model(bevs, ranges)
                     
                     # 兼容性处理：如果返回的是 tuple (out1, local, global)，取最后一个
                     if isinstance(res, tuple): res = res[-1]
@@ -330,12 +323,23 @@ if __name__ == "__main__":
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    if not exists(opt.cachePath): 
+        makedirs(opt.cachePath)
+    
+    # 2. 强制将聚类中心文件指定在 cachePath 下
+    # 我们手动给 opt 加上这个属性，这样后面的代码都不用改
+    opt.centroids_path = join(opt.cachePath, 'centroids_init.hdf5')
+    
+    print(f"====> Cache Directory: {opt.cachePath}")
+    print(f"====> Centroids File:  {opt.centroids_path}")
+    
     # 1. 初始化模型 (Code 1)
     print('===> 加载 FusionPlaceModel')
     model = FusionPlaceModel(
         vggt_path=opt.vggt_path, 
         bev_path=opt.bev_path, 
-        range_dim=opt.range_dim
+        range_dim=opt.range_dim,
+        freeze_backbones=True
     )
     model = model.to(device)
     
@@ -346,7 +350,7 @@ if __name__ == "__main__":
             log_dir = join(opt.runsPath, f"fusion_{datetime.now().strftime('%b%d_%H-%M-%S')}")
             writer = SummaryWriter(log_dir=log_dir)
 
-            if opt.load_from == '': 
+            if opt.load_from == '' : 
                 # 优先尝试从本地读取已有的聚类中心
                 if exists(opt.centroids_path):
                     print(f"✅ 检测到现有的聚类中心文件: {opt.centroids_path}，正在直接加载...")
@@ -361,7 +365,7 @@ if __name__ == "__main__":
                     cluster_dataset = ds_module.FusionInferDataset(
                         dataset_root=opt.dataset_root, 
                         seq=opt.train_seq,
-                        sample_inteval=opt.sample_interval
+                        sample_inteval=1
                     )
                     centroids, descriptors = getClusters(cluster_dataset, opt, model, device)
                     
@@ -437,6 +441,13 @@ if __name__ == "__main__":
 
     elif opt.mode == 'test':
         print('===> 进入测试模式 (使用代码2的封装评估)')
+        # ✅ 必须加上这一段：加载训练好的权重！
+        if opt.load_from and isfile(opt.load_from):
+            print(f"Loading checkpoint for testing: {opt.load_from}")
+            checkpoint = torch.load(opt.load_from)
+            model.load_state_dict(checkpoint['state_dict'])
+        else:
+            print("⚠️ 警告：测试模式下没有指定 --load_from，模型将使用初始权重（Range=0）！")
         
         db_set = ds_module.FusionInferDataset(seq=opt.val_db_seq, dataset_root=opt.dataset_root, sample_inteval=opt.sample_interval)
         q_set = ds_module.FusionInferDataset(seq=opt.val_q_seq, dataset_root=opt.dataset_root, sample_inteval=opt.sample_interval)

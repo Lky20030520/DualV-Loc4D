@@ -87,6 +87,16 @@ class FusionPlaceModel(nn.Module):
         
         status = "FROZEN" if freeze_backbones else "UNFROZEN"
         print(f"🧊 Backbones are {status}. Training Fusion Layer only.")
+        
+        if freeze_backbones:
+            print("🔓 [Unlock] 正在单独解冻 BEV NetVLAD 层 (self.bev_backbone.pooling)...")
+            
+            # 访问 REIN 内部的 pooling (NetVLAD) 模块
+            for p in self.bev_backbone.pooling.parameters():
+                p.requires_grad = True
+                
+        status = "FROZEN (except NetVLAD)" if freeze_backbones else "UNFROZEN"
+        print(f"🧊 Backbones are {status}. Training Fusion Layer + NetVLAD.")
 
         # -------------------------------------------------------
         # D. 融合层
@@ -102,14 +112,15 @@ class FusionPlaceModel(nn.Module):
         self.norm_range_pre = nn.LayerNorm(self.bev_dim)
         self.norm = nn.LayerNorm(self.bev_dim)
 
+
     def _remove_prefix(self, state_dict):
         return {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
 
     def forward(self, bev_img, range_img):
         B = bev_img.shape[0]
-        target_h, target_w = 70, 518
-        if range_img.shape[-2:] != (target_h, target_w):
-            range_img = F.interpolate(range_img, size=(target_h, target_w), mode='bilinear')
+        # target_h, target_w = 70, 518
+        # if range_img.shape[-2:] != (target_h, target_w):
+        #     range_img = F.interpolate(range_img, size=(target_h, target_w), mode='bilinear')
         range_input = range_img.unsqueeze(1)
         
         with torch.no_grad():
@@ -120,19 +131,30 @@ class FusionPlaceModel(nn.Module):
             
         kv = self.proj_range(range_feats)
 
-        bev_map, _ = self.bev_backbone.rem(bev_img)
-            
-        b, c, h, w = bev_map.shape
-        query = bev_map.flatten(2).permute(0, 2, 1)
+        # [BEV 分支]
+        bev_map, _ = self.bev_backbone.rem(bev_img) # 原始特征 (Raw Feature)
         
-        query_norm = self.norm_bev_pre(query)
+        # 准备 Query 用于计算 Attention
+        query_raw = bev_map.flatten(2).permute(0, 2, 1) # [B, N, C]
+        
+        # 1. 支路 Norm (只为了计算 Attention Score，不影响主路)
+        query_norm = self.norm_bev_pre(query_raw)
         kv_norm = self.norm_range_pre(kv)
 
+        # 2. 计算增量信息 (Attention Output)
         attn_out, _ = self.cross_attn(query=query_norm, key=kv_norm, value=kv_norm)
-        fused_seq = self.norm(query_norm + attn_out)
+        
+        # 🚨【核心修改】🚨 
+        # fused_seq = self.norm(query_raw + 0*attn_out)
+        # 改为:   fused_seq = query_raw + attn_out         <-- 保持原始分布！
+        # 解释: 这样 NetVLAD 接收到的就是 (原始特征 + 一点点修正)，它能立刻看懂。
+        fused_seq = query_raw + 0.1*attn_out 
 
-        fused_map = fused_seq.permute(0, 2, 1).view(b, c, h, w)
-        global_desc = self.bev_backbone.pooling(fused_map)
+        # 3. 变形并输出
+        fused_map = fused_seq.permute(0, 2, 1).view(B, self.bev_dim, bev_map.shape[2], bev_map.shape[3])
+        
+        # 此时 fused_map 的分布和 bev_map 几乎一样，NetVLAD 可以直接处理
+        global_desc = self.bev_backbone.pooling(fused_map) 
         final_desc = F.normalize(global_desc, p=2, dim=1)
         
         return final_desc
@@ -140,24 +162,24 @@ class FusionPlaceModel(nn.Module):
     # ==========================================================================
     # [修改] 适配 bev_main.py 的调用接口 (增加 return_all 参数)
     # ==========================================================================
-    def forward_bev_only(self, bev_img, return_all=False):
-        """
-        跳过 VGGT 和 Fusion 层，仅使用 REIN (BEV Backbone) 提取特征。
-        支持 return_all=True 以兼容训练循环的解包需求。
-        """
-        # with torch.no_grad():
-        # 1. 提取特征图 (Local Features)
-        bev_map, _ = self.bev_backbone.rem(bev_img)
+    # def forward_bev_only(self, bev_img, return_all=False):
+    #     """
+    #     跳过 VGGT 和 Fusion 层，仅使用 REIN (BEV Backbone) 提取特征。
+    #     支持 return_all=True 以兼容训练循环的解包需求。
+    #     """
+    #     # with torch.no_grad():
+    #     # 1. 提取特征图 (Local Features)
+    #     bev_map, _ = self.bev_backbone.rem(bev_img)
         
-        # 2. Pooling (NetVLAD / GeM) -> Global Descriptor
-        global_desc = self.bev_backbone.pooling(bev_map)
+    #     # 2. Pooling (NetVLAD / GeM) -> Global Descriptor
+    #     global_desc = self.bev_backbone.pooling(bev_map)
         
-        # 3. 归一化
-        final_desc = F.normalize(global_desc, p=2, dim=1)
+    #     # 3. 归一化
+    #     final_desc = F.normalize(global_desc, p=2, dim=1)
             
-        if return_all:
-            # 训练循环期望返回 3 个值: (local_feats, vlad_feats, global_desc)
-            # 我们这里为了兼容，前两个返回 bev_map 和 None
-            return bev_map, None, final_desc
+    #     if return_all:
+    #         # 训练循环期望返回 3 个值: (local_feats, vlad_feats, global_desc)
+    #         # 我们这里为了兼容，前两个返回 bev_map 和 None
+    #         return bev_map, None, final_desc
             
-        return final_desc
+    #     return final_desc
