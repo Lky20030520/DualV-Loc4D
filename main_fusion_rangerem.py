@@ -20,32 +20,34 @@ import numpy as np
 from tqdm import tqdm
 
 # --- 导入模型 (保留代码1的模型) ---
-from fusion_model import FusionPlaceModel
+from model.fusion_model_rangerem import FusionPlaceModel
 
 # --- 导入数据集 (使用代码1的数据集模块，但可能需要适配代码2的接口) ---
-import fusion_dataset as ds_module 
+import datasets.fusion_dataset as ds_module 
 # 注意：确保 fusion_dataset 中包含 evaluateResults 函数。
 
 def get_args():
-    parser = argparse.ArgumentParser(description='FusionPlace Integrated (Training & Test)')
+    parser = argparse.ArgumentParser(description='FusionPlace (Stage A/B Training)')
+    
+    # ===== 新增：阶段选择 =====
+    parser.add_argument('--stage', type=str, default='B', choices=['A', 'B'],
+                        help='Training stage: A=BEV only, B=BEV+Range fusion')
     
     parser.add_argument('--mode', type=str, default='test', help='Mode', choices=['train', 'test'])
     parser.add_argument('--dataset_root', type=str, default='./datasets/snail', help='Snail 数据集根目录')
     
     # 序列设置
-    # 注意：这里假设 fusion_dataset 内部定义了 train_seq 列表，或者你可以手动指定
     parser.add_argument('--train_seq', type=str, default='if_20231208_4', help='训练序列')
     parser.add_argument('--val_db_seq', type=str, default='if_20231208_4', help='验证数据库')
     parser.add_argument('--val_q_seq', type=str, default='if_20240116_5', help='验证查询')
 
     # 模型参数 (保留代码1的设置)
-    parser.add_argument('--vggt_path', type=str, default='runs/vggt_model/vggtmodel.pt')
-    parser.add_argument('--bev_path', type=str, default='runs/fusion_Jan29_19-29-33/model_best.pth.tar')
-    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb09_16-16-36/model_best.pth.tar', help='恢复训练或测试的模型路径')
-    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated/')
+    parser.add_argument('--bev_path', type=str, default='runs/fusion_Feb14_17-38-13/model_best.pth.tar')
+    parser.add_argument('--load_from', type=str, default='', help='恢复训练或测试的模型路径')
+    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated3/')
     parser.add_argument('--match_save_path', type=str, default='./fusion_match_results/')
     parser.add_argument('--runsPath', type=str, default='./runs/')
-    parser.add_argument('--sample_interval', type=int, default=30)
+    parser.add_argument('--sample_interval', type=int, default=10)
     parser.add_argument('--range_dim', type=int, default=2048)
     
     # 训练参数 (来自代码2)
@@ -53,8 +55,8 @@ def get_args():
     parser.add_argument('--cacheBatchSize', type=int, default=4, help='缓存/推理批量')
     parser.add_argument('--nEpochs', type=int, default=20, help='训练轮数')
     parser.add_argument('--lr', type=float, default=0.0001)
-    parser.add_argument('--lrStep', type=float, default=5)
-    parser.add_argument('--lrGamma', type=float, default=0.5)
+    parser.add_argument('--lrStep', type=float, default=2)
+    parser.add_argument('--lrGamma', type=float, default=0.8)
     parser.add_argument('--weightDecay', type=float, default=0.001)
     parser.add_argument('--threads', type=int, default=0)
     parser.add_argument('--seed', type=int, default=1024)
@@ -118,13 +120,20 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
                 for iteration, (data, indices) in enumerate(tqdm(train_loader, desc="Caching"), 1):
                     # --- 数据解包 ---
                     if isinstance(data, (tuple, list)):
-                        bevs, ranges = data # 取 BEV 和 Range
+                        bevs, ranges = data  # 取 BEV 和 Range
+                    else:
+                        bevs = data
 
                     bevs = bevs.to(device)
-                    ranges = ranges.to(device)
 
-                    # --- 提取特征 ---
-                    res = model(bevs, ranges)
+                    # --- 提取特征 (根据 Stage) ---
+                    if opt.stage == 'A':
+                        # Stage A: 仅 BEV，使用专用方法（不加载 Range）
+                        res = model.forward_bev_only(bevs)
+                    else:
+                        # Stage B: 融合
+                        ranges = ranges.to(device)
+                        res = model(bevs, ranges)
                     
                     # 兼容性处理：如果返回的是 tuple (out1, local, global)，取最后一个
                     if isinstance(res, tuple): res = res[-1]
@@ -159,20 +168,30 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
     criterion = TripletLoss().to(device)
 
     # 这里的循环假设 Dataset 返回 (Query, Pos, Neg, Indices)
-    # 这是一个关键点：你的 fusion_dataset.TrainingDataset 需要支持 Triplet 返回
     for iteration, (query, positives, negatives, indices) in enumerate(train_loader):
-        # 解包双模态数据
-        q_bev, q_range = query
-        p_bev, p_range = positives
-        n_bev, n_range = negatives # 确保数据加载器返回了 n_range
+        # 解包双模态数据（支持单模或双模）
+        if isinstance(query, (tuple, list)):
+            q_bev, q_range = query
+            p_bev, p_range = positives
+            n_bev, n_range = negatives
+        else:
+            q_bev = query
+            p_bev = positives
+            n_bev = negatives
+            q_range = p_range = n_range = None
 
         B = q_bev.shape[0]
         # 拼接数据以减少 Forward 次数
         input_bevs = torch.cat([q_bev, p_bev, n_bev]).to(device)
-        input_ranges = torch.cat([q_range, p_range, n_range]).to(device)
-
-        # 【关键修改】调用完整的融合 forward
-        global_descs = model(input_bevs, input_ranges)
+        
+        # 根据 stage 选择 forward 方式
+        if opt.stage == 'A':
+            # Stage A: 仅 BEV，使用专用方法
+            global_descs = model.forward_bev_only(input_bevs)
+        else:
+            # Stage B: 融合
+            input_ranges = torch.cat([q_range, p_range, n_range]).to(device)
+            global_descs = model(input_bevs, input_ranges)
 
         # 分割特征
         global_descs_Q, global_descs_P, global_descs_N = torch.split(global_descs, [B, B, n_bev.shape[0]])
@@ -198,7 +217,7 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
             writer.add_scalar('Train/BatchLoss', loss.item(), epoch * len(train_loader) + iteration)
 
 def infer_fusion(eval_set, model, opt, device):
-    """ 推理函数 (适配代码2的 infer_bevdata 逻辑) """
+    """ 推理函数 (支持 Stage A/B) """
     model.eval()
     loader = DataLoader(eval_set, batch_size=opt.cacheBatchSize, shuffle=False, 
                         num_workers=opt.threads, collate_fn=ds_module.collate_fn_inference)
@@ -206,13 +225,26 @@ def infer_fusion(eval_set, model, opt, device):
     all_global_descs = []
     with torch.no_grad():
         for data, indices in tqdm(loader, desc="Inference"):
-            (bevs, ranges) = data # 这里的 ranges 不再是 None
-            bevs, ranges = bevs.to(device), ranges.to(device)
+            # 支持 Stage A（只有 BEV）和 Stage B（BEV + Range）
+            if isinstance(data, tuple) and len(data) == 2:
+                bevs, ranges = data
+                bevs = bevs.to(device)
+            else:
+                bevs = data.to(device) if not isinstance(data, torch.Tensor) else data.to(device)
             
-            # 【关键修改】使用完整融合路径
-            res = model(bevs, ranges)
-            if isinstance(res, tuple): res = res[-1]
-            # res = F.normalize(res, p=2, dim=1)
+            # 根据 stage 调用 forward
+            if opt.stage == 'A':
+                # Stage A: 仅 BEV，使用专用方法
+                res = model.forward_bev_only(bevs)
+            else:
+                # Stage B: 融合
+                ranges = ranges.to(device) if 'ranges' in locals() else None
+                res = model(bevs, ranges)
+            
+            # 兼容性：处理 tuple 返回
+            if isinstance(res, tuple): 
+                res = res[-1]
+            
             all_global_descs.append(res.detach().cpu().numpy())
             
     return np.concatenate(all_global_descs, axis=0)
@@ -261,7 +293,7 @@ def getClusters(cluster_set, opt, model, device):
             for iteration, (data, indices) in enumerate(tqdm(data_loader, desc="Extracting Local Feats")):
                 if data is None: continue
                 
-                # [关键适配] 解包双模态数据，只取 BEV
+                # 解包数据（可能是 BEV only 或 BEV+Range）
                 if isinstance(data, (tuple, list)):
                     bevs = data[0] 
                 else:
@@ -269,10 +301,7 @@ def getClusters(cluster_set, opt, model, device):
                 
                 bevs = bevs.to(device)
                 
-                # [关键适配] 绕过 Fusion 层，直接调用 BEV Backbone 提取特征图
-                # REIN.rem 返回 (out1, local_feats)
-                # out1 是下采样后的特征图 (用于 NetVLAD)，local_feats 是全分辨率的
-                # NetVLAD 聚类通常基于 out1 (Low-Res Feature Map)
+                # 直接调用 BEV Backbone（跳过融合层）
                 out1, _ = model.bev_backbone.rem(bevs) 
                 
                 # 变形: [B, C, H, W] -> [B, C, N_pixels] -> [B, N_pixels, C]
@@ -333,13 +362,12 @@ if __name__ == "__main__":
     print(f"====> Cache Directory: {opt.cachePath}")
     print(f"====> Centroids File:  {opt.centroids_path}")
     
-    # 1. 初始化模型 (Code 1)
-    print('===> 加载 FusionPlaceModel')
+    # 1. 初始化模型 (根据 stage 选择)
+    print(f'===> 加载 FusionPlaceModel (Stage {opt.stage})')
     model = FusionPlaceModel(
-        vggt_path=opt.vggt_path, 
-        bev_path=opt.bev_path, 
-        range_dim=opt.range_dim,
-        freeze_backbones=True
+        bev_path=opt.bev_path,
+        stage=opt.stage,  # 关键：传入 stage 参数
+        freeze_backbones=False
     )
     model = model.to(device)
     
@@ -440,14 +468,14 @@ if __name__ == "__main__":
                 }, is_best, log_dir)
 
     elif opt.mode == 'test':
-        print('===> 进入测试模式 (使用代码2的封装评估)')
-        # ✅ 必须加上这一段：加载训练好的权重！
+        print(f'===> 进入测试模式 (Stage {opt.stage})')
+        # 加载训练好的权重
         if opt.load_from and isfile(opt.load_from):
-            print(f"Loading checkpoint for testing: {opt.load_from}")
+            print(f"Loading checkpoint: {opt.load_from}")
             checkpoint = torch.load(opt.load_from)
             model.load_state_dict(checkpoint['state_dict'])
         else:
-            print("⚠️ 警告：测试模式下没有指定 --load_from，模型将使用初始权重（Range=0）！")
+            print("⚠️ 警告：测试模式下没有指定 --load_from")
         
         db_set = ds_module.FusionInferDataset(seq=opt.val_db_seq, dataset_root=opt.dataset_root, sample_inteval=opt.sample_interval)
         q_set = ds_module.FusionInferDataset(seq=opt.val_q_seq, dataset_root=opt.dataset_root, sample_inteval=opt.sample_interval)
@@ -463,10 +491,9 @@ if __name__ == "__main__":
         wrapper.db_split_index = len(db_set.poses)
         wrapper.sample_inteval = opt.sample_interval
         
-        
-        # 借用 bevdata_dataset 的评估函数
+        # 评估
         recall, _, _, _ = ds_module.evaluateResults(
-            seq=f"{opt.val_db_seq}+{opt.val_q_seq}",
+            seq=f"{opt.val_db_seq}+{opt.val_q_seq} (Stage {opt.stage})",
             global_descs=[db_feats, q_feats],
             local_feats=None,
             dataset=wrapper,

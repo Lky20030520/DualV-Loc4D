@@ -7,10 +7,10 @@ from tqdm import trange
 # --- 1. 参数设置 ---
 parser = argparse.ArgumentParser(description='Snail-Radar-Gen-BEV-Images')
 parser.add_argument('--npy_path', type=str, 
-                    default=r'/home/kaiyan/BEVPlace3/datasets/snail/radar/if_20240116_5/enhanced_rich_npy', 
+                    default=r'/home/kaiyan/BEVPlace3/datasets/snail/radar/if/test/database/pointclouds', 
                     help='path to your radar npy files')
 parser.add_argument('--bev_save_path', type=str, 
-                    default=r'/home/kaiyan/BEVPlace3/datasets/snail/radar/if_20240116_5/bev_image', 
+                    default=r'/home/kaiyan/BEVPlace3/datasets/snail/radar/if_20240116_5/bev_image_submap3', 
                     help='path to save images')
 
 # --- 2. 核心参数 ---
