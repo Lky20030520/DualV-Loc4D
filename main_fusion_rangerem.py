@@ -24,7 +24,61 @@ from model.fusion_model_rangerem import FusionPlaceModel
 
 # --- 导入数据集 (使用代码1的数据集模块，但可能需要适配代码2的接口) ---
 import datasets.fusion_dataset as ds_module 
+from datasets.multi_dataset import create_datasets_from_config, MultiSeqDataset, MultiSeqTrainingDataset
 # 注意：确保 fusion_dataset 中包含 evaluateResults 函数。
+
+def load_datasets_smart(opt, mode='train'):
+    """
+    智能加载数据集：自动选择单序列模式 or 多序列配置文件模式
+    
+    Args:
+        opt: 参数对象
+        mode: 'train', 'val', 'test'
+    
+    Returns:
+        train模式: (train_dataset, None)
+        val/test模式: (db_dataset, query_dataset)
+    """
+    # 优先使用配置文件模式
+    if opt.dataset_config and exists(opt.dataset_config):
+        print(f"📂 使用配置文件加载数据集: {opt.dataset_config}")
+        return create_datasets_from_config(
+            mode=mode,
+            config_path=opt.dataset_config,
+            dataset_root=opt.dataset_root,
+            sample_interval=opt.sample_interval,
+            suffix='_preprocessed_accm7'
+        )
+    
+    # 降级到单序列模式（向后兼容）
+    print(f"📁 使用单序列模式加载数据集")
+    
+    if mode == 'train':
+        if not opt.train_seq:
+            raise ValueError("单序列模式下必须指定 --train_seq")
+        train_dataset = ds_module.FusionTrainingDataset(
+            dataset_root=opt.dataset_root,
+            seq=opt.train_seq,
+            sample_inteval=opt.sample_interval
+        )
+        return train_dataset, None
+    
+    else:  # val or test
+        if not opt.val_db_seq or not opt.val_q_seq:
+            raise ValueError("单序列模式下必须指定 --val_db_seq 和 --val_q_seq")
+        
+        db_dataset = ds_module.FusionInferDataset(
+            seq=opt.val_db_seq,
+            dataset_root=opt.dataset_root,
+            sample_inteval=opt.sample_interval
+        )
+        query_dataset = ds_module.FusionInferDataset(
+            seq=opt.val_q_seq,
+            dataset_root=opt.dataset_root,
+            sample_inteval=opt.sample_interval
+        )
+        return db_dataset, query_dataset
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='FusionPlace (Stage A/B Training)')
@@ -33,18 +87,22 @@ def get_args():
     parser.add_argument('--stage', type=str, default='B', choices=['A', 'B'],
                         help='Training stage: A=BEV only, B=BEV+Range fusion')
     
-    parser.add_argument('--mode', type=str, default='test', help='Mode', choices=['train', 'test'])
+    parser.add_argument('--mode', type=str, default='test', help='Mode', choices=['train', 'test', 'val'])
     parser.add_argument('--dataset_root', type=str, default='./datasets/snail', help='Snail 数据集根目录')
     
-    # 序列设置
-    parser.add_argument('--train_seq', type=str, default='if_20231208_4', help='训练序列')
-    parser.add_argument('--val_db_seq', type=str, default='if_20231208_4', help='验证数据库')
-    parser.add_argument('--val_q_seq', type=str, default='if_20240116_5', help='验证查询')
+    # 序列设置 (单序列模式，向后兼容)
+    parser.add_argument('--train_seq', type=str, default='', help='训练序列（单序列模式）')
+    parser.add_argument('--val_db_seq', type=str, default='', help='验证数据库（单序列模式）')
+    parser.add_argument('--val_q_seq', type=str, default='', help='验证查询（单序列模式）')
+    
+    # 多序列配置文件模式
+    parser.add_argument('--dataset_config', type=str, default='', 
+                       help='数据集配置文件路径（如 configs/dataset_splits.json）')
 
     # 模型参数 (保留代码1的设置)
     parser.add_argument('--bev_path', type=str, default='runs/fusion_Feb14_17-38-13!/model_best.pth.tar')
-    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb14_19-33-49！', help='恢复训练或测试的模型路径')
-    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated4/')
+    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb15_14-42-59!', help='恢复训练或测试的模型路径')
+    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated5/')
     parser.add_argument('--match_save_path', type=str, default='./fusion_match_results/')
     parser.add_argument('--runsPath', type=str, default='./runs/')
     parser.add_argument('--sample_interval', type=int, default=10)
@@ -412,13 +470,8 @@ if __name__ == "__main__":
             else:
                 print("✅ 已从 checkpoint 加载权重，跳过 NetVLAD 初始化。")
 
-            # 3. 加载正式训练集 (FusionTrainingDataset)
-            # 这才是后面 train_epoch 用到的
-            train_set = ds_module.FusionTrainingDataset(
-                dataset_root=opt.dataset_root, 
-                seq=opt.train_seq,
-                sample_inteval=opt.sample_interval
-            )
+            # 3. 加载正式训练集 (支持单序列/多序列模式)
+            train_set, _ = load_datasets_smart(opt, mode='train')
             
             optimizer = optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.weightDecay)
             scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=opt.lrStep, gamma=opt.lrGamma)
@@ -430,11 +483,8 @@ if __name__ == "__main__":
                 train_epoch(epoch, model, train_set, opt, device, writer, optimizer)
                 scheduler.step()
                 
-                # ... (验证逻辑保持不变) ...
-                # 验证 (使用代码2的封装评估)
-                # 需要创建临时的 InferDataset
-                db_set = ds_module.FusionInferDataset(seq=opt.val_db_seq, dataset_root=opt.dataset_root,sample_inteval=opt.sample_interval)
-                q_set = ds_module.FusionInferDataset(seq=opt.val_q_seq, dataset_root=opt.dataset_root,sample_inteval=opt.sample_interval)
+                # 验证 (支持单序列/多序列模式)
+                db_set, q_set = load_datasets_smart(opt, mode='val')
                 
                 db_feats = infer_fusion(db_set, model, opt, device)
                 q_feats = infer_fusion(q_set, model, opt, device)
@@ -497,8 +547,8 @@ if __name__ == "__main__":
         else:
             print("⚠️ 警告：测试模式下没有指定 --load_from")
         
-        db_set = ds_module.FusionInferDataset(seq=opt.val_db_seq, dataset_root=opt.dataset_root, sample_inteval=opt.sample_interval)
-        q_set = ds_module.FusionInferDataset(seq=opt.val_q_seq, dataset_root=opt.dataset_root, sample_inteval=opt.sample_interval)
+        # 加载测试数据集 (支持单序列/多序列模式)
+        db_set, q_set = load_datasets_smart(opt, mode='test' if opt.dataset_config else 'val')
         
         print("提取特征...")
         db_feats = infer_fusion(db_set, model, opt, device)

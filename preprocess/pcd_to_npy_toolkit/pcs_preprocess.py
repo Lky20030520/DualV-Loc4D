@@ -154,8 +154,14 @@ def find_closest_image(sorted_image_entries, target_time):
     return before[1] if abs(before[0] - target_time) <= abs(after[0] - target_time) else after[1]
 
 def process_timestamp(timestamp_str):
+    """
+    将时间戳转换为 seconds_microseconds 格式，与 poses 文件命名规则一致
+    例如: 1702473515.979433 -> "1702473515_979433"
+    """
     timestamp_float = float(timestamp_str)
-    return str(int(timestamp_float * 1e6))
+    seconds = int(timestamp_float)
+    microseconds = int((timestamp_float - seconds) * 1e6)
+    return f"{seconds}_{microseconds:06d}"
 
 def normalize_sphere(points):
     """
