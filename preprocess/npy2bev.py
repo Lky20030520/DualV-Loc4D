@@ -7,20 +7,32 @@ from tqdm import trange
 # --- 1. 参数设置 ---
 parser = argparse.ArgumentParser(description='Snail-Radar-Gen-BEV-Images')
 parser.add_argument('--npy_path', type=str, 
-                    default=r'/home/kaiyan/BEVPlace3/datasets/snail/radar/if/test/database/pointclouds', 
+                    default=r'/home/kaiyan/BEVPlace3/datasets/snail/radar/if/pointclouds', 
                     help='path to your radar npy files')
 parser.add_argument('--bev_save_path', type=str, 
-                    default=r'/home/kaiyan/BEVPlace3/datasets/snail/radar/if_20240116_5/bev_image_submap3', 
+                    default=r'/home/kaiyan/BEVPlace3/datasets/snail/radar/if/pointclouds_bev', 
                     help='path to save images')
 
 # --- 2. 核心参数 ---
 VOXEL_SIZE = 0.4
-MAX_RANGE = 100.0
-Z_MIN = -5.0
-Z_MAX = 10.0
+MAX_RANGE = 120.0  # 与pcs_preprocess.py的maximum_range一致
+Z_MIN = -13.0      # 实际NPY数据范围
+Z_MAX = 38.0       # 实际NPY数据范围
+POWER_MIN = 5.0    # 实际强度范围
+POWER_MAX = 32.0
 
 def getBEV_Radar(points_n5): 
     """
+    生成鸟瞰图 (BEV) 图像
+    
+    【重要】拖尾效果说明：
+    - NPY数据来自 accum_win=7 的多帧堆叠（约0.7秒，7帧合并）
+    - 虽然GPS已对齐到中心帧坐标系，但7帧内物体的运动轨迹仍被保留
+    - 动态物体（车辆、行人）在7帧期间移动，形成拖尾/轨迹效果
+    - 静态物体理论上不应有拖尾，但传感器自身运动也会导致轻微位移
+    - 这是正常现象，提供了隐式的运动信息，有助于定位
+    - 如需去除拖尾，需重新生成NPY时使用 accum_win=1（单帧模式）
+    
     输入: points_n5 -> (N, 5) [x, y, z, power, doppler]
     输出: (H, W, 3) BGR 图像
           Ch0 (Blue):  Density (点密度)
@@ -88,9 +100,9 @@ def getBEV_Radar(points_n5):
     max_d = map_density.max()
     if max_d > 0: map_density = map_density / max_d * 255.0
     
-    # Intensity: 截断 0~25 -> 归一化到 0-255
-    map_intensity = np.clip(map_intensity, 0, 25)
-    map_intensity = map_intensity / 25.0 * 255.0
+    # Intensity: 截断实际范围 5~32 -> 归一化到 0-255
+    map_intensity = np.clip(map_intensity, POWER_MIN, POWER_MAX)
+    map_intensity = (map_intensity - POWER_MIN) / (POWER_MAX - POWER_MIN) * 255.0
     
     # Height: 线性映射 Z_MIN~Z_MAX -> 0-255
     # 例如 -5m -> 0, 10m -> 255

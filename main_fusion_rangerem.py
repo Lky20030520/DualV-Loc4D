@@ -42,9 +42,9 @@ def get_args():
     parser.add_argument('--val_q_seq', type=str, default='if_20240116_5', help='验证查询')
 
     # 模型参数 (保留代码1的设置)
-    parser.add_argument('--bev_path', type=str, default='runs/fusion_Feb14_17-38-13/model_best.pth.tar')
-    parser.add_argument('--load_from', type=str, default='', help='恢复训练或测试的模型路径')
-    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated3/')
+    parser.add_argument('--bev_path', type=str, default='runs/fusion_Feb14_17-38-13!/model_best.pth.tar')
+    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb14_19-33-49！', help='恢复训练或测试的模型路径')
+    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated4/')
     parser.add_argument('--match_save_path', type=str, default='./fusion_match_results/')
     parser.add_argument('--runsPath', type=str, default='./runs/')
     parser.add_argument('--sample_interval', type=int, default=10)
@@ -469,11 +469,31 @@ if __name__ == "__main__":
 
     elif opt.mode == 'test':
         print(f'===> 进入测试模式 (Stage {opt.stage})')
-        # 加载训练好的权重
-        if opt.load_from and isfile(opt.load_from):
-            print(f"Loading checkpoint: {opt.load_from}")
-            checkpoint = torch.load(opt.load_from)
-            model.load_state_dict(checkpoint['state_dict'])
+        # 加载训练好的权重（支持传入文件或目录）
+        if opt.load_from:
+            checkpoint_path = None
+            # 传入的是文件
+            if isfile(opt.load_from):
+                checkpoint_path = opt.load_from
+            # 传入的是目录，则尝试常见文件名
+            elif os.path.isdir(opt.load_from):
+                cand = join(opt.load_from, 'model_best.pth.tar')
+                if isfile(cand):
+                    checkpoint_path = cand
+                else:
+                    cand2 = join(opt.load_from, 'checkpoint.pth.tar')
+                    if isfile(cand2):
+                        checkpoint_path = cand2
+            if checkpoint_path:
+                print(f"Loading checkpoint: {checkpoint_path}")
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+                # 兼容保存形式：有的 checkpoint 直接就是 state_dict
+                if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                    model.load_state_dict(checkpoint['state_dict'])
+                else:
+                    model.load_state_dict(checkpoint)
+            else:
+                print(f"⚠️ 指定的 --load_from 未找到可用 checkpoint: {opt.load_from}")
         else:
             print("⚠️ 警告：测试模式下没有指定 --load_from")
         

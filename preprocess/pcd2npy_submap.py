@@ -10,14 +10,14 @@ from typing import List, Dict, Tuple
 from ego_vel_estimate import estimate_ego_vel
 
 def _rotation_matrix_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
-    """根据 rpy 重建旋转矩阵 (Rx @ Ry @ Rz)"""
+    """根据 rpy 重建旋转矩阵 (Rz @ Ry @ Rx)，匹配 scipy.as_euler('xyz')"""
     sr, cr = np.sin(roll), np.cos(roll)
     sp, cp = np.sin(pitch), np.cos(pitch)
     sy, cy = np.sin(yaw), np.cos(yaw)
     Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
     Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
     Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
-    return Rx @ Ry @ Rz
+    return Rz @ Ry @ Rx
 
 def load_gps_poses(csv_path: str) -> Dict[int, np.ndarray]:
     """修改：使用 int 作为 Key"""
@@ -102,7 +102,10 @@ def extract_rich_radar_submaps(src_folder, dst_folder, gps_csv_path, window_size
                 # --- 功能 2: 对点云进行堆叠对齐 ---
                 if curr_ts in all_poses:
                     U_T_curr = all_poses[curr_ts]
-                    # 计算相对于中心帧的变换矩阵: T_rel = inv(T_center) @ T_curr
+                    # 正确变换: 当前帧→世界→中心帧
+                    # U_T_R 表示 World→Radar，所以 Radar_curr→Radar_center:
+                    # T_rel = Rcenter_T_World @ World_T_Rcurr = inv(U_T_center) @ U_T_curr
+                    inv_U_T_center = np.linalg.inv(U_T_center)
                     T_rel = inv_U_T_center @ U_T_curr
                     
                     curr_xyz = static_scan[:, :3]
