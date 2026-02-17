@@ -88,7 +88,7 @@ def get_args():
                         help='Training stage: A=BEV only, B=BEV+Range fusion')
     
     parser.add_argument('--mode', type=str, default='test', help='Mode', choices=['train', 'test', 'val'])
-    parser.add_argument('--dataset_root', type=str, default='./datasets/snail', help='Snail 数据集根目录')
+    parser.add_argument('--dataset_root', type=str, default='/mnt/kaiyan/datasets/SNAIL', help='Snail 数据集根目录')
     
     # 序列设置 (单序列模式，向后兼容)
     parser.add_argument('--train_seq', type=str, default='', help='训练序列（单序列模式）')
@@ -96,16 +96,16 @@ def get_args():
     parser.add_argument('--val_q_seq', type=str, default='', help='验证查询（单序列模式）')
     
     # 多序列配置文件模式
-    parser.add_argument('--dataset_config', type=str, default='', 
+    parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits2.json', 
                        help='数据集配置文件路径（如 configs/dataset_splits.json）')
 
     # 模型参数 (保留代码1的设置)
     parser.add_argument('--bev_path', type=str, default='runs/fusion_Feb14_17-38-13!/model_best.pth.tar')
-    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb15_14-42-59!', help='恢复训练或测试的模型路径')
-    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated5/')
+    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb15_14-42-59!/model_best.pth.tar', help='恢复训练或测试的模型路径')
+    parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated4/')
     parser.add_argument('--match_save_path', type=str, default='./fusion_match_results/')
     parser.add_argument('--runsPath', type=str, default='./runs/')
-    parser.add_argument('--sample_interval', type=int, default=10)
+    parser.add_argument('--sample_interval', type=int, default=2)
     parser.add_argument('--range_dim', type=int, default=2048)
     
     # 训练参数 (来自代码2)

@@ -6,6 +6,59 @@ from model.REIN import NetVLAD, REIN # 如果 NetVLAD 定义在 REIN.py 里，�
 # 如果 REM_SALAD.py 里没有 NetVLAD，请把下面的 NetVLAD 类粘贴进去或者单独导入
 from model.RangeRes import RangeREM 
 
+class GatedFusionUnit(nn.Module):
+    def __init__(self, embed_dim, init_value=0.1):
+        """
+        参数:
+            embed_dim: 特征维度 (128)
+            init_value: 初始的融合比例 (默认 0.1)
+        """
+        super().__init__()
+        
+        # 这是一个"小卷积"网络，用于判断 BEV 和 Attn 的关系
+        # 输入维度是 2 * embed_dim (因为是拼接)
+        # 输出维度是 1 (生成一个标量权重) 或者 embed_dim (生成通道权重)
+        self.gate_net = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim // 2),
+            nn.LayerNorm(embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, embed_dim), # 输出每个通道的权重
+            nn.Sigmoid() # 确保权重在 0~1 之间
+        )
+        
+        # 🛠️【关键技巧】初始化偏置，强制让初始输出接近 0.1
+        # Sigmoid(x) = 0.1  =>  x ≈ -2.2
+        # 这样训练刚开始时，效果等同于你现在的 +0.1*attn
+        self._init_bias(init_value)
+
+    def _init_bias(self, init_val):
+        import math
+        # 反向计算 Sigmoid： x = ln(y / (1-y))
+        bias_val = math.log(init_val / (1.0 - init_val))
+        
+        # 对最后一层 Linear 的 bias 进行赋值
+        nn.init.constant_(self.gate_net[-2].bias, bias_val)
+        # 权重设小一点，减少随机扰动
+        nn.init.normal_(self.gate_net[-2].weight, std=0.001)
+
+    def forward(self, bev, attn):
+        """
+        bev:  [B, N, C]
+        attn: [B, N, C]
+        """
+        # 1. 拼接特征 (看相似性和互补性)
+        concat_feat = torch.cat([bev, attn], dim=-1) # [B, N, 2C]
+        
+        # 2. 计算门控权重 (Gate)
+        # alpha: [B, N, C] -> 针对每个 Token 的每个通道都计算一个权重
+        alpha = self.gate_net(concat_feat)
+        
+        # 3. 加权融合
+        # result = BEV + alpha * Attention
+        fused = bev + alpha * attn
+        
+        return fused, alpha # 返回 alpha 方便你可以 print 看看现在的权重是多少
+
 class FusionPlaceModel(nn.Module):
     def __init__(self, 
                  bev_path=None,    
@@ -50,6 +103,7 @@ class FusionPlaceModel(nn.Module):
             )
             self.norm_bev = nn.LayerNorm(self.feature_dim)
             self.norm_range = nn.LayerNorm(self.feature_dim)
+            self.fusion_gate = GatedFusionUnit(embed_dim=self.feature_dim, init_value=0.1)
         else:
             print(f"📍 [Init] Stage A: BEV-Only Mode (Range disabled)")
             self.range_backbone = None
@@ -64,7 +118,7 @@ class FusionPlaceModel(nn.Module):
         else:
             # Stage B: 冻结 BEV backbone（保持Stage A的特征），开启Range和融合层
             for p in self.bev_backbone.rem.parameters():   
-                p.requires_grad = True
+                p.requires_grad = False
             for p in self.bev_backbone.pooling.parameters():   
                 p.requires_grad = True
             
@@ -130,10 +184,16 @@ class FusionPlaceModel(nn.Module):
             attn_out, _ = self.cross_attn(query=q, key=k, value=v)
             
             # 启用融合（BEV冻结，充分利用Range信息）
-            fused_tokens = bev_tokens + 0.1*attn_out
+            # ✅ 【替换】使用智能门控融合
+            fused_seq, current_alpha = self.fusion_gate(bev_tokens, attn_out)
+
+            # 🕵️ [探针] 仅在训练时打印融合权重
+            if self.training:
+                avg_weight = current_alpha.mean().item()
+                print(f"⚖️ [Gate] 当前 Attention 融合权重均值: {avg_weight:.4f} (初始是 0.1)")
             
             # 4. 转回 map 格式并聚合
-            fused_map = fused_tokens.permute(0, 2, 1).view(B, self.feature_dim, H_bev, W_bev)
+            fused_map = fused_seq.permute(0, 2, 1).view(B, self.feature_dim, H_bev, W_bev)
             # fused_map = F.normalize(fused_map, p=2, dim=1)
             
             # 5. NetVLAD 聚合

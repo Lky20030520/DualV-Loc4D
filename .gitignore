@@ -1,4 +1,7 @@
-/datasets/
+/datasets/__pycache__
+/datasets/*.pyc
+/datasets/snail
+datasets/snail_old
 __pycache__/
 *.pyc
 /cache/
