@@ -363,16 +363,16 @@ class FusionTrainingDataset(data.Dataset):
             # Range 是 [C, H, W]，宽 W 对应 360度
             # 计算需要移动多少个像素
             c, h, w = range_tensor.shape
-            shift_ratio = angle / 360.0
-            # 注意方向：通常 BEV 逆时针转，全景图需要向某一侧滚动
-            # 这里假设顺时针滚动，具体正负可能需要根据雷达厂商定义微调，通常负号对齐
-            pixel_shift = int(w * shift_ratio)
+            # shift_ratio = angle / 360.0
+            # # 注意方向：通常 BEV 逆时针转，全景图需要向某一侧滚动
+            # # 这里假设顺时针滚动，具体正负可能需要根据雷达厂商定义微调，通常负号对齐
+            # pixel_shift = int(w * shift_ratio)
             
-            # 使用 torch.roll 实现循环移位
-            # dims=-1 表示在宽度方向 (W) 滚动
-            range_shifted = torch.roll(range_tensor, shifts=int(w * shift_ratio), dims=-1)
+            # # 使用 torch.roll 实现循环移位
+            # # dims=-1 表示在宽度方向 (W) 滚动
+            # range_shifted = torch.roll(range_tensor, shifts=int(w * shift_ratio), dims=-1)
             
-            return bev_rotated, range_shifted
+            return bev_rotated, range_tensor
 
         # --- 处理 Query ---
         q_bev, q_range = load_and_augment(index)

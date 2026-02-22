@@ -113,12 +113,12 @@ class FusionPlaceModel(nn.Module):
             
             # 对齐到 BEV 的尺寸
             H_bev, W_bev = bev_map.shape[2], bev_map.shape[3]
-            range_map = F.interpolate(
-                range_map, 
-                size=(H_bev, W_bev), 
-                mode='bilinear', 
-                align_corners=False
-            )  # [B, 128, H/4, W/4]
+            # range_map = F.interpolate(
+            #     range_map, 
+            #     size=(H_bev, W_bev), 
+            #     mode='bilinear', 
+            #     align_corners=False
+            # )  # [B, 128, H/4, W/4]
             
             range_tokens = range_map.flatten(2).permute(0, 2, 1)  # [B, N_range, 128]
             
