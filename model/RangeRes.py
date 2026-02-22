@@ -26,19 +26,19 @@ class RangeREM(nn.Module):
         equ_features = []
         
         for i in range(self.num_shifts):
-            # 计算平移量
-            shift = int(W * (i / self.num_shifts))
+            # # 计算平移量
+            # shift = int(W * (i / self.num_shifts))
             
-            # 1. 前向变换 (平移)
-            warped_im = torch.roll(x, shifts=shift, dims=-1)
+            # # 1. 前向变换 (平移)
+            # warped_im = torch.roll(x, shifts=shift, dims=-1)
             
             # 2. 提取特征
-            out = self.encoder(warped_im) 
+            out = self.encoder(x) 
             
             # 3. 逆向变换 (对齐)
             _, _, h_feat, w_feat = out.shape
-            feat_shift = int(w_feat * (i / self.num_shifts))
-            out = torch.roll(out, shifts=-feat_shift, dims=-1)
+            # feat_shift = int(w_feat * (i / self.num_shifts))
+            # out = torch.roll(out, shifts=-feat_shift, dims=-1)
             
             equ_features.append(out.unsqueeze(-1))
 
