@@ -36,7 +36,7 @@ class MultiSeqDataset(data.Dataset):
         # 加载所有序列
         for place, seqs in sequences.items():
             for seq in seqs:
-                seq_path = f"{place}/{seq.replace('/', '_')}{suffix}"
+                seq_path = f"{place}_{seq.replace('/', '_')}{suffix}"
                 seq_name = f"{place}/{seq}"
                 
                 try:
@@ -223,11 +223,13 @@ def load_dataset_config(config_path='configs/dataset_splits.json'):
     return config
 
 
-def create_datasets_from_config(mode, config_path='configs/dataset_splits.json', 
-                                dataset_root='/mnt/kaiyan/datasets/SNAIL',
-                                sample_interval=10, suffix='_preprocessed_accm7'):
+def create_datasets_from_config(mode, config_path='configs/dataset_splits2.json', 
+                            dataset_root='/workspace/DualV-Loc4D/datasets/npy_accum',
+                            sample_interval=10, suffix='_accum_7'):
     """
     从配置文件创建数据集
+    
+
     
     Args:
         mode: 'train', 'val', 'test'
