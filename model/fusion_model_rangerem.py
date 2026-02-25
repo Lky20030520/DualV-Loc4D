@@ -64,7 +64,7 @@ class FusionPlaceModel(nn.Module):
         else:
             # Stage B: 冻结 BEV backbone（保持Stage A的特征），开启Range和融合层
             for p in self.bev_backbone.rem.parameters():   
-                p.requires_grad = True
+                p.requires_grad = False
             for p in self.bev_backbone.pooling.parameters():   
                 p.requires_grad = True
             

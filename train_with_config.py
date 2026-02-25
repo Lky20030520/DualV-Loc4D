@@ -49,7 +49,7 @@ def get_args():
     # === 基础参数 ===
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'val', 'test'],
                         help='运行模式')
-    parser.add_argument('--stage', type=str, default='B', choices=['A', 'B'],
+    parser.add_argument('--stage', type=str, default='A', choices=['A', 'B'],
                         help='训练阶段: A=BEV only, B=BEV+Range fusion')
     
     # === 数据集参数 ===
@@ -57,23 +57,23 @@ def get_args():
                         help='数据集根目录')
     parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits2.json',
                         help='数据集配置文件路径')
-    parser.add_argument('--sample_interval', type=int, default=10,
+    parser.add_argument('--sample_interval', type=int, default=80,
                         help='采样间隔')
     
     # === 模型参数 ===
-    parser.add_argument('--bev_path', type=str, default='runs/fusion_Feb14_17-38-13!/model_best.pth.tar',
+    parser.add_argument('--bev_path', type=str, default='/workspace/DualV-Loc4D/runs/Aug08_10-17-29/model_best.pth.tar',
                         help='使用预训练的 BEV 模型路径')
     parser.add_argument('--load_from', type=str, default='',
                         help='恢复训练的 checkpoint 路径或目录')
     
     # === 缓存和输出 ===
-    parser.add_argument('--cache_dir', type=str, default='./cache/fusion_config5',
+    parser.add_argument('--cache_dir', type=str, default='./cache/fusion_config',
                         help='缓存目录（存放聚类中心和特征）')
     parser.add_argument('--runs_dir', type=str, default='./runs',
                         help='运行结果目录（存放 checkpoints 和 logs）')
     
     # === 训练参数 ===
-    parser.add_argument('--batch_size', type=int, default=1,
+    parser.add_argument('--batch_size', type=int, default=2,
                         help='训练批量大小')
     parser.add_argument('--cache_batch_size', type=int, default=4,
                         help='缓存/推理批量大小')
