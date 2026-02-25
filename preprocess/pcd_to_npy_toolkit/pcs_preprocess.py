@@ -494,7 +494,7 @@ def main():
                 last_pos = interp_poses[idx][:3, 3]
 
     results = []
-    with Pool(initializer=init_stage1, initargs=init1_args) as pool:
+    with Pool(processes=16,initializer=init_stage1, initargs=init1_args) as pool:
         if W == 1:
             for gps_tuple in tqdm(pool.imap_unordered(preprocess_frame, tasks1),
                                   total=len(tasks1), desc="Processing frames"):
@@ -530,7 +530,7 @@ def main():
                       args.generate_images, image_folder,
                       sorted_image_entries, args.target_points,
                       pcd_files, norm_func)
-        with Pool(initializer=init_stage2, initargs=init2_args) as pool:
+        with Pool(processes=16,initializer=init_stage2, initargs=init2_args) as pool:
             for gps_tuple in tqdm(pool.imap_unordered(process_accumulate_window,
                                                       zip(windows, centers)),
                                   total=len(windows), desc="Accumulating windows"):

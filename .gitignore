@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 /cache/
 /runs/
+/datasets/snail_radar
+/datasets/npy_accum
+

@@ -53,11 +53,11 @@ def get_args():
                         help='训练阶段: A=BEV only, B=BEV+Range fusion')
     
     # === 数据集参数 ===
-    parser.add_argument('--dataset_root', type=str, default='/mnt/kaiyan/datasets/SNAIL',
+    parser.add_argument('--dataset_root', type=str, default='/workspace/DualV-Loc4D/datasets/npy_accum',
                         help='数据集根目录')
     parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits2.json',
                         help='数据集配置文件路径')
-    parser.add_argument('--sample_interval', type=int, default=30,
+    parser.add_argument('--sample_interval', type=int, default=10,
                         help='采样间隔')
     
     # === 模型参数 ===
@@ -384,7 +384,7 @@ def validate(model, opt, device, writer, epoch):
         config_path=opt.dataset_config,
         dataset_root=opt.dataset_root,
         sample_interval=opt.sample_interval,
-        suffix='_preprocessed_accm7'
+        suffix='_accum_7'
     )
     
     # 提取特征
@@ -505,7 +505,7 @@ def main():
                     config_path=opt.dataset_config,
                     dataset_root=opt.dataset_root,
                     sample_interval=opt.sample_interval,
-                    suffix='_preprocessed_accm7'
+                    suffix='_accum_7'
                 )
                 # 使用 base_dataset（推理模式）
                 centroids, descriptors = getClusters(cluster_dataset.base_dataset, opt, model, device)
@@ -528,7 +528,7 @@ def main():
             config_path=opt.dataset_config,
             dataset_root=opt.dataset_root,
             sample_interval=opt.sample_interval,
-            suffix='_preprocessed_accm7'
+            suffix='_accum_7'
         )
         print(f"✅ 训练集加载完毕: {len(train_set)} 帧")
         
@@ -599,7 +599,7 @@ def main():
             config_path=opt.dataset_config,
             dataset_root=opt.dataset_root,
             sample_interval=opt.sample_interval,
-            suffix='_preprocessed_accm7'
+            suffix='_accum_7'
         )
         
         # 提取特征

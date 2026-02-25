@@ -11,6 +11,7 @@ import subprocess
 import argparse
 import logging
 from pathlib import Path
+from tqdm import tqdm
 import config_defaults
 
 # 获取脚本目录
@@ -20,9 +21,10 @@ preprocess_dir = script_dir.parent.absolute()
 from config_defaults import DATA_DICT as data_dict
 
 def setup_logging():
+    # 调整日志格式，避免与 tqdm 进度条冲突导致排版错乱
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s"
+        format="%(asctime)s - %(message)s"
     )
 
 def run_batch_preprocess(args):
@@ -64,6 +66,8 @@ def run_batch_preprocess(args):
     if not args.skip_preprocess:
         try:
             logging.info(f"Command: {' '.join(cmd)}")
+            logging.info("🚀 正在启动预处理，下方将显示实时进度（请耐心等待...）")
+            # 关键修改：取消输出拦截，让底层 tqdm 进度条直接打印到终端
             result = subprocess.run(cmd, check=True)
             logging.info("✅ Batch preprocessing completed successfully")
         except subprocess.CalledProcessError as e:
@@ -82,10 +86,9 @@ def generate_images_for_dataset(npy_folder, place, dataset_name, args):
     npy_path = Path(npy_folder) / "pointclouds"
     
     if not npy_path.exists():
-        logging.warning(f"⚠️ Pointcloud folder not found: {npy_path}")
-        return
+        return False, f"⚠️ Pointcloud folder not found: {npy_path}"
     
-    logging.info(f"📁 Processing: {place}/{dataset_name}")
+    status_msgs = []
     
     # 生成 BEV 图像
     if not args.skip_bev:
@@ -100,29 +103,23 @@ def generate_images_for_dataset(npy_folder, place, dataset_name, args):
             "--bev_save_path", str(bev_save_path)
         ]
         
-        logging.info(f"  🗺️  Generating BEV images -> {bev_save_path}")
         try:
+            # 这里的生成非常快，不需要底层输出，保持 capture_output=True 避免刷屏
             subprocess.run(bev_cmd, check=True, capture_output=True, text=True)
-            logging.info(f"  ✅ BEV images generated")
+            status_msgs.append("BEV: ✅")
         except subprocess.CalledProcessError as e:
-            logging.error(f"  ❌ BEV generation failed: {e.stderr}")
+            status_msgs.append("BEV: ❌")
+            return False, f"BEV generation failed: {e.stderr}"
     
     # 生成 Range 图像
     if not args.skip_range:
         range_save_path = npy_path.parent / "range_image"
         range_save_path.mkdir(exist_ok=True)
         
-        # npy2range.py 需要修改环境变量或脚本内容
-        # 这里我们创建一个临时的调用脚本
         range_script = preprocess_dir / "npy2range.py"
-        
-        # 读取 npy2range.py 并动态修改路径（更稳健地替换变量定义行）
         range_script_content = range_script.read_text()
-
-        # 创建临时脚本
         temp_range_script = script_dir / f"_temp_npy2range_{place}_{dataset_name.replace('/', '_')}.py"
 
-        # 按行替换 INPUT_DIR / OUTPUT_DIR 定义（避免依赖硬编码的原始路径）
         new_lines = []
         replaced_input = False
         replaced_output = False
@@ -138,7 +135,6 @@ def generate_images_for_dataset(npy_folder, place, dataset_name, args):
                 continue
             new_lines.append(line)
 
-        # 如果源脚本没有明确的 OUTPUT_DIR 行，则在文件顶部插入定义（保证存在）
         if not replaced_input or not replaced_output:
             header = []
             if not replaced_input:
@@ -150,19 +146,19 @@ def generate_images_for_dataset(npy_folder, place, dataset_name, args):
             modified_content = '\n'.join(new_lines)
 
         temp_range_script.write_text(modified_content)
-        
         range_cmd = [sys.executable, str(temp_range_script)]
         
-        logging.info(f"  📊 Generating Range images -> {range_save_path}")
         try:
             subprocess.run(range_cmd, check=True, capture_output=True, text=True)
-            logging.info(f"  ✅ Range images generated")
+            status_msgs.append("Range: ✅")
         except subprocess.CalledProcessError as e:
-            logging.error(f"  ❌ Range generation failed: {e.stderr}")
+            status_msgs.append("Range: ❌")
+            return False, f"Range generation failed: {e.stderr}"
         finally:
-            # 清理临时文件
             if temp_range_script.exists():
                 temp_range_script.unlink()
+                
+    return True, " | ".join(status_msgs)
 
 def run_image_generation(args):
     """步骤2&3: 为所有数据集生成图像"""
@@ -170,29 +166,37 @@ def run_image_generation(args):
     logging.info("STEP 2&3: Generating BEV and Range images")
     logging.info("=" * 60)
     
-    # 计算输出文件夹名称后缀
     suffix = "" if args.accum_win == 1 else f"_accm{args.accum_win}"
     add_suffix = f"_{args.add_suffix}" if args.add_suffix else ""
     
-    total_datasets = sum(len(folders) for folders in data_dict.values())
-    processed = 0
-    
+    # 收集需要处理的序列
+    sequences_to_process = []
     for place, folder_list in data_dict.items():
         for folder in folder_list:
-            processed += 1
             dataset_name = folder.replace("/", "_")
-            
-            # 构建预处理后的文件夹路径
-            npy_folder = Path(args.save_folder) / place / f"{dataset_name}_preprocessed{suffix}{add_suffix}"
-            
-            logging.info(f"[{processed}/{total_datasets}] {place}/{dataset_name}")
-            
-            if not npy_folder.exists():
-                logging.warning(f"  ⚠️ Folder not found (skipping): {npy_folder}")
-                continue
-            
-            generate_images_for_dataset(npy_folder, place, dataset_name, args)
+            seq_name = f"{place}_{dataset_name}"
+            npy_folder = Path(args.save_folder) / f"{seq_name}_accum_{args.accum_win}"
+            sequences_to_process.append((place, dataset_name, seq_name, npy_folder))
     
+    # 引入 tqdm 进度条
+    pbar = tqdm(sequences_to_process, desc="🖼️ 生成图像中", unit="seq")
+    
+    for place, dataset_name, seq_name, npy_folder in pbar:
+        # 动态更新进度条的后缀信息，显示当前正在处理哪个序列
+        pbar.set_postfix_str(f"正在处理: {seq_name}")
+        
+        if not npy_folder.exists():
+            tqdm.write(f"⚠️ 跳过 (找不到文件夹): {npy_folder}")
+            continue
+        
+        success, msg = generate_images_for_dataset(npy_folder, place, dataset_name, args)
+        
+        # 将结果输出到终端，不打断进度条
+        if success:
+            tqdm.write(f"✨ [{seq_name}] 图像生成完成 -> {msg}")
+        else:
+            tqdm.write(f"❌ [{seq_name}] {msg}")
+            
     logging.info("=" * 60)
     logging.info("✅ All image generation completed!")
     logging.info("=" * 60)
@@ -210,7 +214,7 @@ def main():
     parser.add_argument("--save_folder", type=str, default=config_defaults.SAVE_FOLDER,
                         help="Base folder to save preprocessed data")
     
-    # 预处理参数（与 batch_preprocess.py 一致）
+    # 预处理参数
     parser.add_argument("--accum_win", type=int, default=config_defaults.ACCUM_WIN,
                         help="Number of consecutive frames to accumulate")
     parser.add_argument("--target_points", type=int, default=config_defaults.TARGET_POINTS,
@@ -227,7 +231,7 @@ def main():
     parser.add_argument("-i", "--generate_images", action="store_true",
                         help="Copy images from raw data to new folder")
     
-    # 采样参数（互斥）
+    # 采样参数
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--gap_size", type=float, default=config_defaults.GAP_SIZE,
                        help="Sample gap size between frames")
