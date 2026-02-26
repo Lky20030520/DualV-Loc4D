@@ -257,8 +257,8 @@ class FusionTrainingDataset(data.Dataset):
 
         self.poses = self.base_dataset.poses
         
-        self.pos_thres = 10 
-        self.neg_thres = 50 
+        self.pos_thres = 3 
+        self.neg_thres = 18
         self.num_neg = 5 
         self.positives, self.negatives = self._compute_pos_neg_samples()
         
@@ -490,7 +490,7 @@ def evaluateResults(seq, global_descs, local_feats, dataset, match_results_save_
         db_descs = global_descs[:db_idx].astype(np.float32)
         q_descs = global_descs[db_idx:].astype(np.float32)
 
-    gt_thres = 25
+    gt_thres = 5
     faiss_index = faiss.IndexFlatL2(desc_dim)
     all_positives = 0
     tp = 0

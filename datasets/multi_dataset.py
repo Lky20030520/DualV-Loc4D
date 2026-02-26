@@ -120,8 +120,8 @@ class MultiSeqTrainingDataset(data.Dataset):
             self.poses = self.base_dataset.poses
         
         # 训练相关参数
-        self.pos_thres = 10
-        self.neg_thres = 50
+        self.pos_thres = 3
+        self.neg_thres = 18
         self.num_neg = 5
         
         # 计算正负样本索引

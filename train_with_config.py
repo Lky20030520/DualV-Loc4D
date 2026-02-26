@@ -32,13 +32,14 @@ from datasets import fusion_dataset as ds_module
 
 class TripletLoss(nn.Module):
     """三元组损失"""
-    def __init__(self, margin=0.3):
+    def __init__(self, margin=0.3, eps=1e-8):
         super(TripletLoss, self).__init__()
         self.margin = margin
+        self.eps = eps
 
     def forward(self, anchor, positive, negative):
-        pos_dist = torch.sqrt((anchor - positive).pow(2).sum())
-        neg_dist = torch.sqrt((anchor - negative).pow(2).sum(1))
+        pos_dist = torch.sqrt((anchor - positive).pow(2).sum()+ self.eps)
+        neg_dist = torch.sqrt((anchor - negative).pow(2).sum(1)+ self.eps)
         loss = F.relu(pos_dist - neg_dist + self.margin)
         return loss
 
@@ -57,13 +58,13 @@ def get_args():
                         help='数据集根目录')
     parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits2.json',
                         help='数据集配置文件路径')
-    parser.add_argument('--sample_interval', type=int, default=80,
+    parser.add_argument('--sample_interval', type=int, default=1,
                         help='采样间隔')
     
     # === 模型参数 ===
     parser.add_argument('--bev_path', type=str, default='/workspace/DualV-Loc4D/runs/Aug08_10-17-29/model_best.pth.tar',
                         help='使用预训练的 BEV 模型路径')
-    parser.add_argument('--load_from', type=str, default='',
+    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb25_12-51-36/model_best.pth.tar',
                         help='恢复训练的 checkpoint 路径或目录')
     
     # === 缓存和输出 ===
@@ -73,9 +74,9 @@ def get_args():
                         help='运行结果目录（存放 checkpoints 和 logs）')
     
     # === 训练参数 ===
-    parser.add_argument('--batch_size', type=int, default=2,
+    parser.add_argument('--batch_size', type=int, default=7,
                         help='训练批量大小')
-    parser.add_argument('--cache_batch_size', type=int, default=4,
+    parser.add_argument('--cache_batch_size', type=int, default=8,
                         help='缓存/推理批量大小')
     parser.add_argument('--epochs', type=int, default=20,
                         help='训练轮数')
@@ -89,7 +90,7 @@ def get_args():
                         help='权重衰减')
     
     # === 系统参数 ===
-    parser.add_argument('--threads', type=int, default=0,
+    parser.add_argument('--threads', type=int, default=16,
                         help='数据加载线程数')
     parser.add_argument('--seed', type=int, default=1024,
                         help='随机种子')
@@ -480,7 +481,7 @@ def main():
             
             if exists(ckpt_path):
                 print(f"✅ 加载 checkpoint: {ckpt_path}")
-                ckpt = torch.load(ckpt_path, map_location=device)
+                ckpt = torch.load(ckpt_path, map_location=device,weights_only=False)
                 if 'state_dict' in ckpt:
                     model.load_state_dict(ckpt['state_dict'])
                 else:
@@ -583,7 +584,7 @@ def main():
             
             if exists(ckpt_path):
                 print(f"✅ 加载 checkpoint: {ckpt_path}")
-                ckpt = torch.load(ckpt_path, map_location=device)
+                ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
                 if 'state_dict' in ckpt:
                     model.load_state_dict(ckpt['state_dict'])
                 else:
