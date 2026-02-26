@@ -8,6 +8,7 @@ import sys
 import os
 import argparse
 import json
+import csv
 from os.path import join, exists, isfile
 from os import makedirs
 from datetime import datetime
@@ -22,6 +23,7 @@ from tqdm import tqdm
 import h5py
 import shutil
 import faiss
+import cv2
 from math import ceil
 
 # 导入模型和数据集模块
@@ -32,7 +34,7 @@ from datasets import fusion_dataset as ds_module
 
 class TripletLoss(nn.Module):
     """三元组损失"""
-    def __init__(self, margin=0.3, eps=1e-8):
+    def __init__(self, margin=0.5, eps=1e-8):
         super(TripletLoss, self).__init__()
         self.margin = margin
         self.eps = eps
@@ -50,7 +52,7 @@ def get_args():
     # === 基础参数 ===
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'val', 'test'],
                         help='运行模式')
-    parser.add_argument('--stage', type=str, default='A', choices=['A', 'B'],
+    parser.add_argument('--stage', type=str, default='B', choices=['A', 'B'],
                         help='训练阶段: A=BEV only, B=BEV+Range fusion')
     
     # === 数据集参数 ===
@@ -62,32 +64,42 @@ def get_args():
                         help='采样间隔')
     
     # === 模型参数 ===
-    parser.add_argument('--bev_path', type=str, default='/workspace/DualV-Loc4D/runs/Aug08_10-17-29/model_best.pth.tar',
+    parser.add_argument('--bev_path', type=str, default='runs/fusion_Feb25_12-51-36/model_best.pth.tar',
                         help='使用预训练的 BEV 模型路径')
-    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb25_12-51-36/model_best.pth.tar',
+    parser.add_argument('--load_from', type=str, default='runs/fusion_Feb26_05-08-33/model_best.pth.tar',
                         help='恢复训练的 checkpoint 路径或目录')
     
     # === 缓存和输出 ===
-    parser.add_argument('--cache_dir', type=str, default='./cache/fusion_config',
+    parser.add_argument('--cache_dir', type=str, default='./cache/fusion_config2',
                         help='缓存目录（存放聚类中心和特征）')
     parser.add_argument('--runs_dir', type=str, default='./runs',
                         help='运行结果目录（存放 checkpoints 和 logs）')
     
     # === 训练参数 ===
-    parser.add_argument('--batch_size', type=int, default=7,
+    parser.add_argument('--batch_size', type=int, default=4,
                         help='训练批量大小')
-    parser.add_argument('--cache_batch_size', type=int, default=8,
+    parser.add_argument('--cache_batch_size', type=int, default=2,
                         help='缓存/推理批量大小')
     parser.add_argument('--epochs', type=int, default=20,
                         help='训练轮数')
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='学习率')
-    parser.add_argument('--lr_step', type=int, default=2,
+    parser.add_argument('--lr_step', type=int, default=3,
                         help='学习率衰减步长（epochs）')
-    parser.add_argument('--lr_gamma', type=float, default=0.8,
+    parser.add_argument('--lr_gamma', type=float, default=0.9,
                         help='学习率衰减系数')
     parser.add_argument('--weight_decay', type=float, default=0.001,
                         help='权重衰减')
+
+    # === 测试可视化参数 ===
+    parser.add_argument('--visualize_test', action='store_true',
+                        help='在 val/test 结束后保存检索可视化结果（test 模式默认开启）')
+    parser.add_argument('--vis_topk', type=int, default=1,
+                        help='可视化检索 Top-K（建议 1）')
+    parser.add_argument('--vis_max_cases', type=int, default=80,
+                        help='最多保存多少个 query 的可视化样例')
+    parser.add_argument('--vis_output_dir', type=str, default='',
+                        help='可视化输出目录；为空时自动创建')
     
     # === 系统参数 ===
     parser.add_argument('--threads', type=int, default=16,
@@ -429,6 +441,396 @@ def save_checkpoint(state, is_best, save_dir):
         print(f"💾 最佳模型已保存: {best_path}")
 
 
+def _resolve_bev_path(dataset, global_index):
+    """从数据集中解析某个全局索引对应的样本字典。"""
+    if hasattr(dataset, 'pairs'):
+        if 0 <= global_index < len(dataset.pairs):
+            item = dataset.pairs[global_index]
+            if isinstance(item, dict):
+                seq_name = getattr(dataset, 'seq', None)
+                return {
+                    'bev': item.get('bev'),
+                    'range': item.get('range'),
+                    'ts': item.get('ts', None),
+                    'seq': seq_name
+                }
+        return None
+
+    if hasattr(dataset, 'subdatasets') and hasattr(dataset, 'cumulative_lengths'):
+        for i, (start, end) in enumerate(zip(dataset.cumulative_lengths[:-1], dataset.cumulative_lengths[1:])):
+            if start <= global_index < end:
+                local_idx = global_index - start
+                subdataset = dataset.subdatasets[i]
+                if hasattr(subdataset, 'pairs') and 0 <= local_idx < len(subdataset.pairs):
+                    item = subdataset.pairs[local_idx]
+                    if isinstance(item, dict):
+                        seq_name = getattr(subdataset, 'seq', None)
+                        return {
+                            'bev': item.get('bev'),
+                            'range': item.get('range'),
+                            'ts': item.get('ts', None),
+                            'seq': seq_name
+                        }
+                break
+    return None
+
+
+def _infer_visual_root(dataset_root):
+    parent_dir = os.path.dirname(os.path.abspath(dataset_root))
+    candidates = [
+        os.path.join(parent_dir, 'snail_radar'),
+        os.path.join(parent_dir, 'snail'),
+    ]
+    for cand in candidates:
+        if exists(cand):
+            return cand
+    return None
+
+
+def _raw_seq_from_processed(seq_name):
+    if not seq_name:
+        return None
+    if '_accum_' in seq_name:
+        return seq_name.split('_accum_')[0]
+    return seq_name
+
+
+def _build_camera_index(cam_dir):
+    if not cam_dir or not exists(cam_dir):
+        return None, None
+    image_names = sorted([f for f in os.listdir(cam_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+    if len(image_names) == 0:
+        return None, None
+    timestamps = []
+    valid_names = []
+    for name in image_names:
+        stem = os.path.splitext(name)[0]
+        try:
+            ts = float(stem)
+            timestamps.append(ts)
+            valid_names.append(name)
+        except Exception:
+            continue
+    if len(valid_names) == 0:
+        return None, None
+    return np.asarray(timestamps, dtype=np.float64), valid_names
+
+
+def _match_camera_gray(info, visual_root, cam_cache, tolerance=0.2):
+    if info is None:
+        return None
+    seq = _raw_seq_from_processed(info.get('seq', None))
+    ts = info.get('ts', None)
+    if (visual_root is None) or (seq is None) or (ts is None):
+        return None
+
+    if seq not in cam_cache:
+        cam_dir = os.path.join(visual_root, seq, 'zed2i', 'left')
+        ts_arr, names = _build_camera_index(cam_dir)
+        cam_cache[seq] = {
+            'dir': cam_dir,
+            'ts': ts_arr,
+            'names': names
+        }
+
+    entry = cam_cache[seq]
+    if entry['ts'] is None:
+        return None
+
+    idx = int(np.searchsorted(entry['ts'], ts))
+    candidates = []
+    if idx < len(entry['ts']):
+        candidates.append(idx)
+    if idx > 0:
+        candidates.append(idx - 1)
+    if len(candidates) == 0:
+        return None
+
+    best = min(candidates, key=lambda i: abs(entry['ts'][i] - ts))
+    if abs(entry['ts'][best] - ts) > tolerance:
+        return None
+
+    img_path = os.path.join(entry['dir'], entry['names'][best])
+    if not exists(img_path):
+        return None
+
+    img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def _read_or_placeholder_image(img_path, height=320, width=320):
+    if img_path and exists(img_path):
+        img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        if img is not None:
+            return cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+    return np.full((height, width, 3), 180, dtype=np.uint8)
+
+
+def _read_or_placeholder_from_array(img, height=320, width=320):
+    if img is not None:
+        resized = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+        if len(resized.shape) == 2:
+            resized = cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
+        return resized
+    placeholder = np.full((height, width, 3), 242, dtype=np.uint8)
+    cv2.putText(placeholder, 'N/A', (width // 2 - 20, height // 2 + 5),
+                cv2.FONT_HERSHEY_DUPLEX, 0.55, (130, 130, 130), 1, cv2.LINE_AA)
+    return placeholder
+
+
+def _draw_text_clean(img, text, org, font_scale=0.55, color=(40, 40, 40), thickness=1):
+    cv2.putText(
+        img, text, org,
+        cv2.FONT_HERSHEY_DUPLEX,
+        font_scale,
+        color,
+        thickness,
+        cv2.LINE_AA
+    )
+
+
+def _add_card_border(img, border_color=(210, 210, 210)):
+    h, w = img.shape[:2]
+    cv2.rectangle(img, (0, 0), (w - 1, h - 1), border_color, 1)
+    return img
+
+
+def _render_triplet_row(bev_img, gray_img, range_img, labels, section_title,
+                        section_color=(80, 120, 220), cell_h=240, cell_w=300,
+                        pad=10, title_h=36):
+    cells = [
+        _read_or_placeholder_from_array(bev_img, cell_h, cell_w),
+        _read_or_placeholder_from_array(gray_img, cell_h, cell_w),
+        _read_or_placeholder_from_array(range_img, cell_h, cell_w),
+    ]
+    cells = [_add_card_border(c.copy()) for c in cells]
+
+    row_w = pad * 4 + cell_w * 3
+    row_h = title_h + cell_h + pad * 2
+    row = np.full((row_h, row_w, 3), 252, dtype=np.uint8)
+
+    cv2.line(row, (0, title_h), (row_w - 1, title_h), (220, 220, 220), 1)
+    _draw_text_clean(row, section_title, (10, 24), font_scale=0.58, color=(45, 45, 45), thickness=1)
+
+    # 三个模态卡片
+    for i, cell in enumerate(cells):
+        x0 = pad + i * (cell_w + pad)
+        y0 = title_h + pad
+        row[y0:y0 + cell_h, x0:x0 + cell_w] = cell
+
+        # 轻量标签条
+        label_text = labels[i]
+        cv2.rectangle(row, (x0 + 6, y0 + 6), (x0 + 124, y0 + 30), (255, 255, 255), -1)
+        cv2.rectangle(row, (x0 + 6, y0 + 6), (x0 + 124, y0 + 30), (210, 210, 210), 1)
+        _draw_text_clean(row, label_text, (x0 + 12, y0 + 24), font_scale=0.48, color=(60, 60, 60), thickness=1)
+
+    return row
+
+
+def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
+    """保存 test/val 检索可视化：CSV明细、Top-1配对图、轨迹连线图。"""
+    makedirs(save_dir, exist_ok=True)
+    cases_dir = join(save_dir, 'top1_cases')
+    makedirs(cases_dir, exist_ok=True)
+
+    db_feats = np.asarray(db_feats, dtype=np.float32)
+    q_feats = np.asarray(q_feats, dtype=np.float32)
+    topk = max(1, min(opt.vis_topk, len(db_feats)))
+
+    index = faiss.IndexFlatL2(db_feats.shape[1])
+    index.add(db_feats)
+    distances, predictions = index.search(q_feats, topk)
+
+    db_poses = np.asarray(db_set.poses)
+    q_poses = np.asarray(q_set.poses)
+    gt_thres = 5.0
+
+    details_path = join(save_dir, 'retrieval_details.csv')
+    visual_root = _infer_visual_root(opt.dataset_root)
+    cam_cache = {}
+    recall_count = 0
+    all_positives = 0
+
+    with open(details_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            'query_idx', 'rank', 'pred_db_idx', 'feature_l2',
+            'xyz_distance', 'is_tp',
+            'query_bev_path', 'query_range_path', 'query_visual_gray_source',
+            'pred_bev_path', 'pred_range_path', 'pred_visual_gray_source'
+        ])
+
+        for q_idx in range(len(q_feats)):
+            query_pose = q_poses[q_idx]
+            gt_dis = (query_pose - db_poses) ** 2
+            positives = np.where(np.sum(gt_dis[:, [3, 7, 11]], axis=1) < gt_thres ** 2)[0]
+
+            if len(positives) > 0:
+                all_positives += 1
+
+            for rank in range(topk):
+                pred_idx = int(predictions[q_idx, rank])
+                feat_l2 = float(distances[q_idx, rank])
+                xyz_dist = float(np.linalg.norm(query_pose[[3, 7, 11]] - db_poses[pred_idx, [3, 7, 11]]))
+                is_tp = bool(pred_idx in positives) if len(positives) > 0 else False
+
+                if rank == 0 and is_tp:
+                    recall_count += 1
+
+                q_info = _resolve_bev_path(q_set, q_idx)
+                db_info = _resolve_bev_path(db_set, pred_idx)
+                q_vis_src = None
+                d_vis_src = None
+                if q_info is not None and q_info.get('seq', None) is not None:
+                    q_vis_src = os.path.join(
+                        visual_root if visual_root else '',
+                        _raw_seq_from_processed(q_info.get('seq', '')),
+                        'zed2i', 'left'
+                    ) if visual_root else None
+                if db_info is not None and db_info.get('seq', None) is not None:
+                    d_vis_src = os.path.join(
+                        visual_root if visual_root else '',
+                        _raw_seq_from_processed(db_info.get('seq', '')),
+                        'zed2i', 'left'
+                    ) if visual_root else None
+
+                writer.writerow([
+                    q_idx, rank + 1, pred_idx, f"{feat_l2:.6f}",
+                    f"{xyz_dist:.6f}", int(is_tp),
+                    q_info.get('bev') if q_info else None,
+                    q_info.get('range') if q_info else None,
+                    q_vis_src,
+                    db_info.get('bev') if db_info else None,
+                    db_info.get('range') if db_info else None,
+                    d_vis_src
+                ])
+
+    # Top-1 图像配对可视化
+    vis_cases = min(opt.vis_max_cases, len(q_feats))
+    for q_idx in range(vis_cases):
+        pred_idx = int(predictions[q_idx, 0])
+        query_pose = q_poses[q_idx]
+        xyz_dist = float(np.linalg.norm(query_pose[[3, 7, 11]] - db_poses[pred_idx, [3, 7, 11]]))
+        is_tp = xyz_dist < gt_thres
+
+        q_info = _resolve_bev_path(q_set, q_idx)
+        d_info = _resolve_bev_path(db_set, pred_idx)
+
+        q_bev = cv2.imread(q_info['bev'], cv2.IMREAD_COLOR) if q_info and q_info.get('bev') and exists(q_info['bev']) else None
+        d_bev = cv2.imread(d_info['bev'], cv2.IMREAD_COLOR) if d_info and d_info.get('bev') and exists(d_info['bev']) else None
+
+        q_range = cv2.imread(q_info['range'], cv2.IMREAD_COLOR) if q_info and q_info.get('range') and exists(q_info['range']) else None
+        d_range = cv2.imread(d_info['range'], cv2.IMREAD_COLOR) if d_info and d_info.get('range') and exists(d_info['range']) else None
+
+        q_gray = _match_camera_gray(q_info, visual_root, cam_cache)
+        d_gray = _match_camera_gray(d_info, visual_root, cam_cache)
+
+        q_row = _render_triplet_row(
+            q_bev, q_gray, q_range,
+            ['BEV', 'Visual Gray', 'Range'],
+            section_title='Query Modalities',
+            section_color=(235, 235, 235)
+        )
+        d_row = _render_triplet_row(
+            d_bev, d_gray, d_range,
+            ['BEV', 'Visual Gray', 'Range'],
+            section_title='Retrieved DB Modalities',
+            section_color=(235, 235, 235)
+        )
+
+        gap = 10
+        info_h = 52
+        panel_w = max(q_row.shape[1], d_row.shape[1])
+        panel_h = q_row.shape[0] + d_row.shape[0] + gap * 3 + info_h
+        panel = np.full((panel_h, panel_w + 24, 3), 255, dtype=np.uint8)
+
+        # 外层边框
+        cv2.rectangle(panel, (6, 6), (panel.shape[1] - 7, panel.shape[0] - 7), (210, 210, 210), 1)
+
+        # 顶部标题
+        title = f"Retrieval Case #{q_idx:05d}  |  Pred DB #{pred_idx:05d}"
+        _draw_text_clean(panel, title, (16, 26), font_scale=0.62, color=(30, 30, 30), thickness=1)
+
+        y = 34
+        panel[y:y + q_row.shape[0], 12:12 + q_row.shape[1]] = q_row
+        y += q_row.shape[0] + gap
+        panel[y:y + d_row.shape[0], 12:12 + d_row.shape[1]] = d_row
+
+        # 底部信息条
+        y += d_row.shape[0] + gap
+        status_text = 'TRUE POSITIVE' if is_tp else 'FALSE POSITIVE'
+        cv2.rectangle(panel, (12, y), (panel.shape[1] - 12, y + info_h), (255, 255, 255), -1)
+        cv2.rectangle(panel, (12, y), (panel.shape[1] - 12, y + info_h), (225, 225, 225), 1)
+
+        dot_color = (85, 150, 85) if is_tp else (95, 95, 200)
+        cv2.circle(panel, (28, y + 25), 6, dot_color, -1)
+        _draw_text_clean(panel, status_text, (42, y + 30), font_scale=0.50, color=(45, 45, 45), thickness=1)
+
+        metric_text = f"XYZ Distance: {xyz_dist:.2f} m   (Threshold: {gt_thres:.1f} m)"
+        _draw_text_clean(panel, metric_text, (265, y + 30), font_scale=0.50, color=(45, 45, 45), thickness=1)
+
+        save_name = f"case_{q_idx:05d}_pred_{pred_idx:05d}_{'TP' if is_tp else 'FP'}.jpg"
+        cv2.imwrite(join(cases_dir, save_name), panel)
+
+    # 轨迹连线图（x-y）
+    canvas_h, canvas_w = 1200, 1200
+    pad = 40
+    canvas = np.full((canvas_h, canvas_w, 3), 255, dtype=np.uint8)
+
+    all_x = np.concatenate([db_poses[:, 3], q_poses[:, 3]])
+    all_y = np.concatenate([db_poses[:, 7], q_poses[:, 7]])
+    min_x, max_x = float(np.min(all_x)), float(np.max(all_x))
+    min_y, max_y = float(np.min(all_y)), float(np.max(all_y))
+
+    def to_canvas_xy(x, y):
+        nx = 0.5 if max_x == min_x else (x - min_x) / (max_x - min_x)
+        ny = 0.5 if max_y == min_y else (y - min_y) / (max_y - min_y)
+        px = int(pad + nx * (canvas_w - 2 * pad))
+        py = int(canvas_h - (pad + ny * (canvas_h - 2 * pad)))
+        return px, py
+
+    for i in range(len(db_poses)):
+        p = to_canvas_xy(db_poses[i, 3], db_poses[i, 7])
+        cv2.circle(canvas, p, 2, (255, 120, 0), -1)
+    for i in range(len(q_poses)):
+        p = to_canvas_xy(q_poses[i, 3], q_poses[i, 7])
+        cv2.circle(canvas, p, 2, (0, 180, 0), -1)
+
+    sampled = np.linspace(0, len(q_poses) - 1, num=max(1, min(vis_cases, len(q_poses))), dtype=int)
+    for q_idx in sampled:
+        pred_idx = int(predictions[q_idx, 0])
+        q_pt = to_canvas_xy(q_poses[q_idx, 3], q_poses[q_idx, 7])
+        d_pt = to_canvas_xy(db_poses[pred_idx, 3], db_poses[pred_idx, 7])
+        xyz_dist = float(np.linalg.norm(q_poses[q_idx, [3, 7, 11]] - db_poses[pred_idx, [3, 7, 11]]))
+        color = (0, 200, 0) if xyz_dist < gt_thres else (0, 0, 255)
+        cv2.line(canvas, q_pt, d_pt, color, 1)
+
+    cv2.putText(canvas, 'DB points: orange | Query points: green | Match lines: TP=green FP=red',
+                (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 40, 40), 1)
+    cv2.imwrite(join(save_dir, 'trajectory_matches_top1.jpg'), canvas)
+
+    recall_top1 = recall_count / all_positives if all_positives > 0 else 0.0
+    summary_path = join(save_dir, 'summary.json')
+    with open(summary_path, 'w') as f:
+        json.dump({
+            'num_db': int(len(db_feats)),
+            'num_query': int(len(q_feats)),
+            'topk': int(topk),
+            'gt_threshold_m': gt_thres,
+            'recall_top1_from_visualizer': float(recall_top1),
+            'details_csv': details_path,
+            'cases_dir': cases_dir
+        }, f, indent=2)
+
+    print(f"🖼️ 可视化已保存到: {save_dir}")
+    print(f"   - 明细: {details_path}")
+    print(f"   - 配对图: {cases_dir}")
+    print(f"   - 轨迹图: {join(save_dir, 'trajectory_matches_top1.jpg')}")
+
+
 def main():
     opt = get_args()
     setup_seed(opt.seed)
@@ -624,6 +1026,24 @@ def main():
             dataset=wrapper,
             match_results_save_path=None
         )
+
+        should_visualize = opt.visualize_test or (opt.mode == 'test')
+        if should_visualize:
+            if opt.vis_output_dir:
+                vis_dir = opt.vis_output_dir
+            else:
+                vis_dir = join(
+                    opt.runs_dir,
+                    f"{opt.mode}_vis_{datetime.now().strftime('%b%d_%H-%M-%S')}"
+                )
+            visualize_test_results(
+                db_set=db_set,
+                q_set=q_set,
+                db_feats=db_feats,
+                q_feats=q_feats,
+                opt=opt,
+                save_dir=vis_dir
+            )
         
         print(f"\n{'='*60}")
         print(f"✨ 最终 Recall@1: {recall:.4f}")
