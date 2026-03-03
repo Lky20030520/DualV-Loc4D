@@ -96,8 +96,12 @@ def get_args():
                         help='在 val/test 结束后保存检索可视化结果（test 模式默认开启）')
     parser.add_argument('--vis_topk', type=int, default=1,
                         help='可视化检索 Top-K（建议 1）')
-    parser.add_argument('--vis_max_cases', type=int, default=80,
+    parser.add_argument('--vis_max_cases', type=int, default=200,
                         help='最多保存多少个 query 的可视化样例')
+    parser.add_argument('--vis_case_interval', type=int, default=10,
+                        help='可视化样例间隔（例如 5 表示每隔 5 帧保存一张）')
+    parser.add_argument('--match_dist_thres', type=float, default=3.0,
+                        help='判定 TP/FP 的距离阈值（米）')
     parser.add_argument('--vis_output_dir', type=str, default='',
                         help='可视化输出目录；为空时自动创建')
     
@@ -646,7 +650,7 @@ def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
 
     db_poses = np.asarray(db_set.poses)
     q_poses = np.asarray(q_set.poses)
-    gt_thres = 5.0
+    gt_thres = float(opt.match_dist_thres)
 
     details_path = join(save_dir, 'retrieval_details.csv')
     visual_root = _infer_visual_root(opt.dataset_root)
@@ -709,8 +713,10 @@ def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
                 ])
 
     # Top-1 图像配对可视化
-    vis_cases = min(opt.vis_max_cases, len(q_feats))
-    for q_idx in range(vis_cases):
+    interval = max(1, int(getattr(opt, 'vis_case_interval', 1)))
+    q_indices = list(range(0, len(q_feats), interval))[:max(0, int(opt.vis_max_cases))]
+    vis_cases = len(q_indices)
+    for q_idx in q_indices:
         pred_idx = int(predictions[q_idx, 0])
         query_pose = q_poses[q_idx]
         xyz_dist = float(np.linalg.norm(query_pose[[3, 7, 11]] - db_poses[pred_idx, [3, 7, 11]]))
@@ -742,9 +748,11 @@ def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
         )
 
         gap = 10
+        top_h = 34
         info_h = 52
+        bottom_pad = 14
         panel_w = max(q_row.shape[1], d_row.shape[1])
-        panel_h = q_row.shape[0] + d_row.shape[0] + gap * 3 + info_h
+        panel_h = top_h + q_row.shape[0] + gap + d_row.shape[0] + gap + info_h + bottom_pad
         panel = np.full((panel_h, panel_w + 24, 3), 255, dtype=np.uint8)
 
         # 外层边框
@@ -754,7 +762,7 @@ def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
         title = f"Retrieval Case #{q_idx:05d}  |  Pred DB #{pred_idx:05d}"
         _draw_text_clean(panel, title, (16, 26), font_scale=0.62, color=(30, 30, 30), thickness=1)
 
-        y = 34
+        y = top_h
         panel[y:y + q_row.shape[0], 12:12 + q_row.shape[1]] = q_row
         y += q_row.shape[0] + gap
         panel[y:y + d_row.shape[0], 12:12 + d_row.shape[1]] = d_row
@@ -765,7 +773,7 @@ def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
         cv2.rectangle(panel, (12, y), (panel.shape[1] - 12, y + info_h), (255, 255, 255), -1)
         cv2.rectangle(panel, (12, y), (panel.shape[1] - 12, y + info_h), (225, 225, 225), 1)
 
-        dot_color = (85, 150, 85) if is_tp else (95, 95, 200)
+        dot_color = (85, 150, 85) if is_tp else (40, 40, 220)
         cv2.circle(panel, (28, y + 25), 6, dot_color, -1)
         _draw_text_clean(panel, status_text, (42, y + 30), font_scale=0.50, color=(45, 45, 45), thickness=1)
 
@@ -799,7 +807,7 @@ def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
         p = to_canvas_xy(q_poses[i, 3], q_poses[i, 7])
         cv2.circle(canvas, p, 2, (0, 180, 0), -1)
 
-    sampled = np.linspace(0, len(q_poses) - 1, num=max(1, min(vis_cases, len(q_poses))), dtype=int)
+    sampled = np.asarray(q_indices, dtype=int)
     for q_idx in sampled:
         pred_idx = int(predictions[q_idx, 0])
         q_pt = to_canvas_xy(q_poses[q_idx, 3], q_poses[q_idx, 7])
@@ -813,6 +821,7 @@ def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
     cv2.imwrite(join(save_dir, 'trajectory_matches_top1.jpg'), canvas)
 
     recall_top1 = recall_count / all_positives if all_positives > 0 else 0.0
+    recall_metrics = compute_recall_at_k(db_poses, q_poses, predictions, [1, 5, 10], gt_thres=gt_thres)
     summary_path = join(save_dir, 'summary.json')
     with open(summary_path, 'w') as f:
         json.dump({
@@ -821,14 +830,56 @@ def visualize_test_results(db_set, q_set, db_feats, q_feats, opt, save_dir):
             'topk': int(topk),
             'gt_threshold_m': gt_thres,
             'recall_top1_from_visualizer': float(recall_top1),
+            'recall_at_1': float(recall_metrics.get(1, 0.0)),
+            'recall_at_5': float(recall_metrics.get(5, 0.0)),
+            'recall_at_10': float(recall_metrics.get(10, 0.0)),
             'details_csv': details_path,
             'cases_dir': cases_dir
         }, f, indent=2)
 
     print(f"🖼️ 可视化已保存到: {save_dir}")
     print(f"   - 明细: {details_path}")
-    print(f"   - 配对图: {cases_dir}")
+    print(f"   - 配对图: {cases_dir} (共 {vis_cases} 张, interval={interval})")
     print(f"   - 轨迹图: {join(save_dir, 'trajectory_matches_top1.jpg')}")
+
+
+def compute_recall_at_k(db_poses, q_poses, predictions, ks=(1, 5, 10), gt_thres=3.0):
+    """根据检索结果计算 recall@k。"""
+    db_poses = np.asarray(db_poses)
+    q_poses = np.asarray(q_poses)
+    predictions = np.asarray(predictions)
+
+    if predictions.ndim != 2:
+        raise ValueError("predictions 应为二维数组，形状为 [num_query, topk]")
+
+    ks = sorted(set(int(k) for k in ks if int(k) > 0))
+    if len(ks) == 0:
+        return {}
+
+    hit_counts = {k: 0 for k in ks}
+    all_positives = 0
+
+    for q_idx in range(len(q_poses)):
+        query_pose = q_poses[q_idx]
+        gt_dis = (query_pose - db_poses) ** 2
+        positives = np.where(np.sum(gt_dis[:, [3, 7, 11]], axis=1) < gt_thres ** 2)[0]
+
+        if len(positives) == 0:
+            continue
+        all_positives += 1
+
+        pred_row = predictions[q_idx]
+        for k in ks:
+            k_eff = min(k, len(pred_row))
+            if k_eff <= 0:
+                continue
+            if np.intersect1d(pred_row[:k_eff], positives).size > 0:
+                hit_counts[k] += 1
+
+    if all_positives == 0:
+        return {k: 0.0 for k in ks}
+
+    return {k: hit_counts[k] / all_positives for k in ks}
 
 
 def main():
@@ -1027,6 +1078,18 @@ def main():
             match_results_save_path=None
         )
 
+        metric_topk = max(1, min(10, len(db_feats)))
+        metric_index = faiss.IndexFlatL2(db_feats.shape[1])
+        metric_index.add(np.asarray(db_feats, dtype=np.float32))
+        _, metric_predictions = metric_index.search(np.asarray(q_feats, dtype=np.float32), metric_topk)
+        recall_metrics = compute_recall_at_k(
+            db_poses=db_set.poses,
+            q_poses=q_set.poses,
+            predictions=metric_predictions,
+            ks=(1, 5, 10),
+            gt_thres=float(opt.match_dist_thres)
+        )
+
         should_visualize = opt.visualize_test or (opt.mode == 'test')
         if should_visualize:
             if opt.vis_output_dir:
@@ -1047,6 +1110,8 @@ def main():
         
         print(f"\n{'='*60}")
         print(f"✨ 最终 Recall@1: {recall:.4f}")
+        print(f"✨ 最终 Recall@5: {recall_metrics.get(5, 0.0):.4f}")
+        print(f"✨ 最终 Recall@10: {recall_metrics.get(10, 0.0):.4f}")
         print(f"{'='*60}")
 
 
