@@ -189,10 +189,7 @@ class MultiSeqTrainingDataset(data.Dataset):
             bev, range_tensor, _ = self.base_dataset[idx]
             angle = random.uniform(-30, 30)
             bev_rotated = TF.rotate(bev, angle)
-            c, h, w = range_tensor.shape
-            shift_ratio = angle / 360.0
-            range_shifted = torch.roll(range_tensor, shifts=int(w * shift_ratio), dims=-1)
-            return bev_rotated, range_shifted
+            return bev_rotated, range_tensor
         
         q_bev, q_range = load_and_augment(index)
         p_bev, p_range = load_and_augment(pos_idx)

@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
+import sys
+from pathlib import Path
 from model.REIN import NetVLAD, REIN # 如果 NetVLAD 定义在 REIN.py 里，请导入它
 # 如果 REM_SALAD.py 里没有 NetVLAD，请把下面的 NetVLAD 类粘贴进去或者单独导入
 from model.RangeRes import RangeREM 
@@ -37,13 +39,56 @@ class GatedFusionUnit(nn.Module):
     def _init_bias(self, init_val):
         import math
         bias_val = math.log(init_val / (1.0 - init_val))
-        nn.init.constant_(self.gate_net[-2].bias, bias_val)
-        nn.init.normal_(self.gate_net[-2].weight, std=0.001)
+        final_linear = self.gate_net[3]
+        nn.init.constant_(final_linear.bias, bias_val)
+        nn.init.normal_(final_linear.weight, std=0.001)
 
     def forward(self, bev, attn):
         alpha = self.gate_net(torch.cat([bev, attn], dim=-1))
         fused = bev + alpha * attn
         return fused, alpha
+
+
+class FrozenOnlineDinoExtractor(nn.Module):
+    """使用本地 VGGT(包含 DINOv2 表征)在线提取全局语义向量。"""
+
+    def __init__(self, ckpt_path=''):
+        super().__init__()
+        project_root = Path(__file__).resolve().parent.parent
+        vggt_root = project_root / 'vggt-main'
+        if vggt_root.exists() and str(vggt_root) not in sys.path:
+            sys.path.append(str(vggt_root))
+
+        try:
+            from vggt.models.vggt import VGGT
+        except Exception as e:
+            raise RuntimeError(
+                "在线 DINO 路径初始化失败：无法导入 VGGT 依赖。"
+                "请安装缺失依赖（例如: pip install einops）并确认 vggt-main 可用。"
+            ) from e
+
+        self.backbone = VGGT()
+        if ckpt_path and os.path.exists(ckpt_path):
+            state = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+            if isinstance(state, dict) and 'state_dict' in state:
+                state = state['state_dict']
+            if isinstance(state, dict):
+                state = {k.replace('module.', ''): v for k, v in state.items()}
+                self.backbone.load_state_dict(state, strict=False)
+
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        self.backbone.eval()
+
+    def forward(self, camera_img):
+        # camera_img: [B, 3, H, W], 输入应为 [0,1] 范围的 RGB 张量
+        with torch.no_grad():
+            images = camera_img.unsqueeze(1)
+            agg_list, patch_start_idx = self.backbone.aggregator(images)
+            tokens = agg_list[-1]
+            patch_tokens = tokens[:, :, patch_start_idx:, :]
+            global_vec = patch_tokens.mean(dim=[1, 2])
+        return global_vec
 
 class FusionPlaceModel(nn.Module):
     def __init__(self, 
@@ -55,6 +100,8 @@ class FusionPlaceModel(nn.Module):
                  vision_dim=2048,
                  enable_semantic_fusion=False,
                  enable_gated_fusion=True,
+                 enable_online_dino=False,
+                 dino_ckpt_path='',
                  **kwargs): 
         super().__init__()
         
@@ -62,6 +109,7 @@ class FusionPlaceModel(nn.Module):
         self.feature_dim = 128
         self.enable_semantic_fusion = enable_semantic_fusion
         self.enable_gated_fusion = enable_gated_fusion
+        self.enable_online_dino = enable_online_dino
         
         # =======================================================
         # BEV 分支 (必须)
@@ -92,8 +140,14 @@ class FusionPlaceModel(nn.Module):
                     radar_dim=self.feature_dim,
                     vision_dim=vision_dim
                 )
+                if self.enable_online_dino:
+                    print("🖼️  [Init] Online frozen DINO(VGGT) enabled")
+                    self.online_dino = FrozenOnlineDinoExtractor(ckpt_path=dino_ckpt_path)
+                else:
+                    self.online_dino = None
             else:
                 self.semantic_fusion = None
+                self.online_dino = None
             
             print(f"⚙️  [Init] Cross-Attention: Dim={self.feature_dim}")
             self.cross_attn = nn.MultiheadAttention(
@@ -113,6 +167,7 @@ class FusionPlaceModel(nn.Module):
             self.range_backbone = None
             self.semantic_fusion = None
             self.fusion_gate = None
+            self.online_dino = None
 
         # =======================================================
         # 训练策略
@@ -136,6 +191,9 @@ class FusionPlaceModel(nn.Module):
             if self.semantic_fusion is not None:
                 for p in self.semantic_fusion.parameters():
                     p.requires_grad = True
+                if self.online_dino is not None:
+                    for p in self.online_dino.parameters():
+                        p.requires_grad = False
             
             # Cross-Attention和LayerNorm自动开启
             for p in self.cross_attn.parameters(): 
@@ -148,7 +206,7 @@ class FusionPlaceModel(nn.Module):
                 for p in self.fusion_gate.parameters():
                     p.requires_grad = True
 
-    def forward(self, bev_img, range_img=None, dino_global=None):
+    def forward(self, bev_img, range_img=None, dino_global=None, camera_img=None):
         """
         Args:
             bev_img: [B, 3, H, W]
@@ -178,8 +236,19 @@ class FusionPlaceModel(nn.Module):
             # 2. Range 特征
             range_map, _ = self.range_backbone(range_img)  # [B, 128, H/8, W/8]
 
+            if self.online_dino is not None and camera_img is not None:
+                # 在线从相机图像提取全局语义向量
+                self.online_dino.eval()
+                dino_global = self.online_dino(camera_img)
+
             # 可选：用 DINO 全局语义增强 Range 分支
             if self.semantic_fusion is not None and dino_global is not None:
+                if dino_global.ndim != 2:
+                    raise ValueError(f"dino_global 维度错误，期望 [B, D]，实际 {tuple(dino_global.shape)}")
+                if dino_global.shape[0] != range_map.shape[0]:
+                    raise ValueError(
+                        f"SCA 批次不对齐: dino_global.B={dino_global.shape[0]} vs range_map.B={range_map.shape[0]}"
+                    )
                 range_map = self.semantic_fusion(range_map, dino_global)
             
             # 对齐到 BEV 的尺寸

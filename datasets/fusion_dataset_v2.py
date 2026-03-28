@@ -26,7 +26,11 @@ def get_transforms():
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    return bev_tf, range_tf 
+    cam_tf = transforms.Compose([
+        transforms.Resize((518, 518)),
+        transforms.ToTensor(),
+    ])
+    return bev_tf, range_tf, cam_tf 
 
 
 # 在 get_transforms 中添加 normalize 定义
@@ -48,7 +52,19 @@ def get_transforms():
 #     ])
 #     return bev_tf, range_tf
 
-BEV_TF, RANGE_TF = get_transforms()
+BEV_TF, RANGE_TF, CAM_TF = get_transforms()
+
+
+def _build_camera_lookup(camera_dir):
+    if not camera_dir or not exists(camera_dir):
+        return {}
+    exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+    lookup = {}
+    for f in os.listdir(camera_dir):
+        stem, ext = splitext(f)
+        if ext.lower() in exts:
+            lookup[stem] = join(camera_dir, f)
+    return lookup
 
 
 def _to_timestamp_key(value):
@@ -137,11 +153,13 @@ def extract_timestamp(filename):
 
 class FusionInferDataset(data.Dataset):
     def __init__(self, seq, dataset_root='datasets/snail', sample_inteval=1,
-                 enable_dino=False, dino_feature_path='', dino_dim=2048):
+                 enable_dino=False, dino_feature_path='', dino_dim=2048,
+                 enable_online_dino=False):
         super().__init__()
         self.sample_inteval = sample_inteval
         self.seq = seq
         self.enable_dino = enable_dino
+        self.enable_online_dino = enable_online_dino
         self.dino_dim = dino_dim
         self._dino_lookup, detected_dim = _load_dino_feature_lookup(dino_feature_path)
         if detected_dim is not None:
@@ -163,6 +181,13 @@ class FusionInferDataset(data.Dataset):
         self.bev_dir = join(base_dir, 'bev_image') 
         self.range_dir = join(base_dir, 'range_image') 
         self.pose_dir = join(base_dir, 'poses')
+        self.camera_dir = None
+        for c in ['images', 'image', 'camera_image', 'cam_image']:
+            cand = join(base_dir, c)
+            if exists(cand):
+                self.camera_dir = cand
+                break
+        self._camera_lookup = _build_camera_lookup(self.camera_dir)
 
         if not exists(self.bev_dir) or not exists(self.range_dir):
             raise FileNotFoundError(f"数据子目录缺失:\nBEV: {self.bev_dir}\nRange: {self.range_dir}")
@@ -209,7 +234,8 @@ class FusionInferDataset(data.Dataset):
                 self.pairs.append({
                     'bev': join(self.bev_dir, bev_f),
                     'range': join(self.range_dir, range_f),
-                    'ts': bev_ts
+                    'ts': bev_ts,
+                    'stem': splitext(bev_f)[0]
                 })
                 match_count += 1
         
@@ -294,6 +320,16 @@ class FusionInferDataset(data.Dataset):
             # =======================================================
             range_img = Image.open(item['range']).convert('RGB')
             range_tensor = RANGE_TF(range_img)
+
+            if self.enable_online_dino:
+                cam_path = self._camera_lookup.get(item['stem'], None)
+                if cam_path is not None and exists(cam_path):
+                    cam_img = Image.open(cam_path).convert('RGB')
+                    cam_tensor = CAM_TF(cam_img)
+                else:
+                    # 兜底空图，避免 batch 中断
+                    cam_tensor = torch.zeros((3, 518, 518), dtype=torch.float32)
+                return bev_tensor, range_tensor, cam_tensor, index
             
             if self.enable_dino:
                 ts_key = _to_timestamp_key(item['ts'])
@@ -310,7 +346,8 @@ class FusionInferDataset(data.Dataset):
 
 class FusionTrainingDataset(data.Dataset):
     def __init__(self, dataset_root='datasets/snail', seq='radar', max_frames=10000, cache_path=None,
-                 sample_inteval=1, enable_dino=False, dino_feature_path='', dino_dim=2048):
+                 sample_inteval=1, enable_dino=False, dino_feature_path='', dino_dim=2048,
+                 enable_online_dino=False):
         super().__init__()
         # 复用上面的 InferDataset
         self.base_dataset = FusionInferDataset(
@@ -319,7 +356,8 @@ class FusionTrainingDataset(data.Dataset):
             sample_inteval=sample_inteval,
             enable_dino=enable_dino,
             dino_feature_path=dino_feature_path,
-            dino_dim=dino_dim
+            dino_dim=dino_dim,
+            enable_online_dino=enable_online_dino
         )
         
         if len(self.base_dataset) > max_frames:

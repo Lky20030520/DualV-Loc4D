@@ -55,9 +55,9 @@ def get_args():
     # === 数据集参数 ===
     parser.add_argument('--dataset_root', type=str, default='/mnt/kaiyan/datasets/SNAIL',
                         help='数据集根目录')
-    parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits2.json',
+    parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits_test.json',
                         help='数据集配置文件路径')
-    parser.add_argument('--sample_interval', type=int, default=30,
+    parser.add_argument('--sample_interval', type=int, default=2,
                         help='采样间隔')
     
     # === 模型参数 ===
@@ -67,8 +67,12 @@ def get_args():
                         help='恢复训练的 checkpoint 路径或目录')
     parser.add_argument('--enable_semantic_fusion', action='store_true',
                         help='启用 SCA/DINOv2 语义通道调制')
+    parser.add_argument('--dino_mode', type=str, default='online', choices=['online', 'offline'],
+                        help='语义输入模式: online=相机在线提特征(默认), offline=读取预提取向量')
     parser.add_argument('--dino_feature_path', type=str, default='',
                         help='预提取 DINO 全局特征文件(.pt)，需包含 global_vec 与 timestamps 或 image_paths')
+    parser.add_argument('--dino_online_ckpt', type=str, default='runs/vggt_model/vggtmodel.pt',
+                        help='在线 DINO(VGGT) 权重路径')
     parser.add_argument('--dino_dim', type=int, default=2048,
                         help='DINO 全局语义向量维度')
     parser.add_argument('--disable_gated_fusion', action='store_true',
@@ -214,17 +218,20 @@ def infer_fusion(eval_set, model, opt, device):
             if isinstance(data, tuple) and len(data) >= 2:
                 bevs = data[0].to(device)
                 ranges = data[1].to(device)
-                dino_global = data[2].to(device) if len(data) > 2 else None
+                semantic_input = data[2].to(device) if len(data) > 2 else None
             else:
                 bevs = data.to(device)
                 ranges = None
-                dino_global = None
+                semantic_input = None
             
             # 前向传播
             if opt.stage == 'A':
                 desc = model.forward_bev_only(bevs)
             else:
-                desc = model(bevs, ranges, dino_global=dino_global)
+                if opt.enable_semantic_fusion and opt.dino_mode == 'online':
+                    desc = model(bevs, ranges, camera_img=semantic_input)
+                else:
+                    desc = model(bevs, ranges, dino_global=semantic_input)
             
             # 处理返回值 (可能是 tuple)
             if isinstance(desc, tuple):
@@ -267,11 +274,11 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
                     if isinstance(data, (tuple, list)):
                         bevs = data[0]
                         ranges = data[1] if len(data) > 1 else None
-                        dino_global = data[2] if len(data) > 2 else None
+                        semantic_input = data[2] if len(data) > 2 else None
                     else:
                         bevs = data
                         ranges = None
-                        dino_global = None
+                        semantic_input = None
 
                     bevs = bevs.to(device)
 
@@ -280,8 +287,11 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
                         res = model.forward_bev_only(bevs)
                     else:
                         ranges = ranges.to(device)
-                        dino_global = dino_global.to(device) if dino_global is not None else None
-                        res = model(bevs, ranges, dino_global=dino_global)
+                        semantic_input = semantic_input.to(device) if semantic_input is not None else None
+                        if opt.enable_semantic_fusion and opt.dino_mode == 'online':
+                            res = model(bevs, ranges, camera_img=semantic_input)
+                        else:
+                            res = model(bevs, ranges, dino_global=semantic_input)
                     
                     # 兼容性处理
                     if isinstance(res, tuple): 
@@ -334,9 +344,9 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
         q_bev, q_range = query[0], query[1]
         p_bev, p_range = positives[0], positives[1]
         n_bev, n_range = negatives[0], negatives[1]
-        q_dino = query[2] if len(query) > 2 else None
-        p_dino = positives[2] if len(positives) > 2 else None
-        n_dino = negatives[2] if len(negatives) > 2 else None
+        q_sem = query[2] if len(query) > 2 else None
+        p_sem = positives[2] if len(positives) > 2 else None
+        n_sem = negatives[2] if len(negatives) > 2 else None
         
         B = q_bev.shape[0]
         
@@ -349,10 +359,13 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
         else:
             # Stage B: BEV + Range 融合
             input_ranges = torch.cat([q_range, p_range, n_range]).to(device)
-            input_dino = None
-            if q_dino is not None and p_dino is not None and n_dino is not None:
-                input_dino = torch.cat([q_dino, p_dino, n_dino]).to(device)
-            descs = model(input_bevs, input_ranges, dino_global=input_dino)
+            input_sem = None
+            if q_sem is not None and p_sem is not None and n_sem is not None:
+                input_sem = torch.cat([q_sem, p_sem, n_sem]).to(device)
+            if opt.enable_semantic_fusion and opt.dino_mode == 'online':
+                descs = model(input_bevs, input_ranges, camera_img=input_sem)
+            else:
+                descs = model(input_bevs, input_ranges, dino_global=input_sem)
         
         # 分割特征
         desc_q, desc_p, desc_n = torch.split(descs, [B, B, n_bev.shape[0]])
@@ -405,7 +418,8 @@ def validate(model, opt, device, writer, epoch):
         dataset_root=opt.dataset_root,
         sample_interval=opt.sample_interval,
         suffix='_preprocessed_accm7',
-        enable_dino=opt.enable_semantic_fusion,
+        enable_dino=(opt.enable_semantic_fusion and opt.dino_mode == 'offline'),
+        enable_online_dino=(opt.enable_semantic_fusion and opt.dino_mode == 'online'),
         dino_feature_path=opt.dino_feature_path,
         dino_dim=opt.dino_dim
     )
@@ -454,6 +468,9 @@ def save_checkpoint(state, is_best, save_dir):
 def main():
     opt = get_args()
     setup_seed(opt.seed)
+
+    if opt.enable_semantic_fusion and opt.dino_mode == 'offline' and not opt.dino_feature_path:
+        raise ValueError('dino_mode=offline 时必须提供 --dino_feature_path')
     
     # 设置设备
     device = torch.device(opt.device)
@@ -471,7 +488,9 @@ def main():
         freeze_backbones=False,
         vision_dim=opt.dino_dim,
         enable_semantic_fusion=opt.enable_semantic_fusion,
-        enable_gated_fusion=not opt.disable_gated_fusion
+        enable_gated_fusion=not opt.disable_gated_fusion,
+        enable_online_dino=(opt.enable_semantic_fusion and opt.dino_mode == 'online'),
+        dino_ckpt_path=opt.dino_online_ckpt
     )
     model = model.to(device)
     
@@ -532,7 +551,8 @@ def main():
                     dataset_root=opt.dataset_root,
                     sample_interval=opt.sample_interval,
                     suffix='_preprocessed_accm7',
-                    enable_dino=False
+                    enable_dino=False,
+                    enable_online_dino=False
                 )
                 # 使用 base_dataset（推理模式）
                 centroids, descriptors = getClusters(cluster_dataset.base_dataset, opt, model, device)
@@ -556,7 +576,8 @@ def main():
             dataset_root=opt.dataset_root,
             sample_interval=opt.sample_interval,
             suffix='_preprocessed_accm7',
-            enable_dino=opt.enable_semantic_fusion,
+            enable_dino=(opt.enable_semantic_fusion and opt.dino_mode == 'offline'),
+            enable_online_dino=(opt.enable_semantic_fusion and opt.dino_mode == 'online'),
             dino_feature_path=opt.dino_feature_path,
             dino_dim=opt.dino_dim
         )
@@ -630,7 +651,8 @@ def main():
             dataset_root=opt.dataset_root,
             sample_interval=opt.sample_interval,
             suffix='_preprocessed_accm7',
-            enable_dino=opt.enable_semantic_fusion,
+            enable_dino=(opt.enable_semantic_fusion and opt.dino_mode == 'offline'),
+            enable_online_dino=(opt.enable_semantic_fusion and opt.dino_mode == 'online'),
             dino_feature_path=opt.dino_feature_path,
             dino_dim=opt.dino_dim
         )

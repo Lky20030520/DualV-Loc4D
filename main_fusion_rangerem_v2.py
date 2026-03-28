@@ -108,7 +108,7 @@ def get_args():
     parser.add_argument('--val_q_seq', type=str, default='', help='验证查询（单序列模式）')
     
     # 多序列配置文件模式
-    parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits2.json', 
+    parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits_test.json', 
                        help='数据集配置文件路径（如 configs/dataset_splits.json）')
 
     # 模型参数 (保留代码1的设置)

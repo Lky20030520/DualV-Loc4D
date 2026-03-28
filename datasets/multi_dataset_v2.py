@@ -13,7 +13,8 @@ class MultiSeqDataset(data.Dataset):
     """合并多个序列的数据集（用于推理/验证）"""
     
     def __init__(self, sequences, dataset_root, sample_interval=1, suffix='_preprocessed_accm7',
-                 enable_dino=False, dino_feature_path='', dino_dim=2048):
+                 enable_dino=False, dino_feature_path='', dino_dim=2048,
+                 enable_online_dino=False):
         """
         Args:
             sequences: dict, 格式 {"place": ["seq1", "seq2"], ...}
@@ -47,7 +48,8 @@ class MultiSeqDataset(data.Dataset):
                         sample_inteval=sample_interval,
                         enable_dino=enable_dino,
                         dino_feature_path=dino_feature_path,
-                        dino_dim=dino_dim
+                        dino_dim=dino_dim,
+                        enable_online_dino=enable_online_dino
                     )
                     self.subdatasets.append(subdataset)
                     self.seq_names.append(seq_name)
@@ -96,7 +98,8 @@ class MultiSeqTrainingDataset(data.Dataset):
     
     def __init__(self, sequences, dataset_root, max_frames=None, 
                  cache_path=None, sample_interval=1, suffix='_preprocessed_accm7',
-                 enable_dino=False, dino_feature_path='', dino_dim=2048):
+                 enable_dino=False, dino_feature_path='', dino_dim=2048,
+                 enable_online_dino=False):
         """
         Args:
             sequences: dict, 同 MultiSeqDataset
@@ -113,7 +116,8 @@ class MultiSeqTrainingDataset(data.Dataset):
             suffix=suffix,
             enable_dino=enable_dino,
             dino_feature_path=dino_feature_path,
-            dino_dim=dino_dim
+            dino_dim=dino_dim,
+            enable_online_dino=enable_online_dino
         )
         
         # 应用最大帧数限制
@@ -202,10 +206,7 @@ class MultiSeqTrainingDataset(data.Dataset):
                 dino_feat = None
             angle = random.uniform(-30, 30)
             bev_rotated = TF.rotate(bev, angle)
-            c, h, w = range_tensor.shape
-            shift_ratio = angle / 360.0
-            range_shifted = torch.roll(range_tensor, shifts=int(w * shift_ratio), dims=-1)
-            return bev_rotated, range_shifted, dino_feat
+            return bev_rotated, range_tensor, dino_feat
         
         q_bev, q_range, q_dino = load_and_augment(index)
         p_bev, p_range, p_dino = load_and_augment(pos_idx)
@@ -244,7 +245,8 @@ def load_dataset_config(config_path='configs/dataset_splits.json'):
 def create_datasets_from_config(mode, config_path='configs/dataset_splits.json', 
                                 dataset_root='/mnt/kaiyan/datasets/SNAIL',
                                 sample_interval=10, suffix='_preprocessed_accm7',
-                                enable_dino=False, dino_feature_path='', dino_dim=2048):
+                                enable_dino=False, dino_feature_path='', dino_dim=2048,
+                                enable_online_dino=False):
     """
     从配置文件创建数据集
     
@@ -283,7 +285,8 @@ def create_datasets_from_config(mode, config_path='configs/dataset_splits.json',
             suffix=suffix,
             enable_dino=enable_dino,
             dino_feature_path=dino_feature_path,
-            dino_dim=dino_dim
+            dino_dim=dino_dim,
+            enable_online_dino=enable_online_dino
         )
         return train_dataset, None
     
@@ -296,7 +299,8 @@ def create_datasets_from_config(mode, config_path='configs/dataset_splits.json',
             suffix=suffix,
             enable_dino=enable_dino,
             dino_feature_path=dino_feature_path,
-            dino_dim=dino_dim
+            dino_dim=dino_dim,
+            enable_online_dino=enable_online_dino
         )
         
         query_dataset = MultiSeqDataset(
@@ -306,7 +310,8 @@ def create_datasets_from_config(mode, config_path='configs/dataset_splits.json',
             suffix=suffix,
             enable_dino=enable_dino,
             dino_feature_path=dino_feature_path,
-            dino_dim=dino_dim
+            dino_dim=dino_dim,
+            enable_online_dino=enable_online_dino
         )
         
         return db_dataset, query_dataset

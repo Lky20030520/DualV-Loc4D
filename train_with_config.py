@@ -55,9 +55,9 @@ def get_args():
     # === 数据集参数 ===
     parser.add_argument('--dataset_root', type=str, default='/mnt/kaiyan/datasets/SNAIL',
                         help='数据集根目录')
-    parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits2.json',
+    parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits_test.json',
                         help='数据集配置文件路径')
-    parser.add_argument('--sample_interval', type=int, default=30,
+    parser.add_argument('--sample_interval', type=int, default=2,
                         help='采样间隔')
     
     # === 模型参数 ===
