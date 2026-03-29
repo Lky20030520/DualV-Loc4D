@@ -94,7 +94,7 @@ class MultiSeqDataset(data.Dataset):
 
 
 class MultiSeqTrainingDataset(data.Dataset):
-    """合并多个序列的训练数据集（支持 Hard Mining）"""
+    """合并多个序列的训练数据集。"""
     
     def __init__(self, sequences, dataset_root, max_frames=None, 
                  cache_path=None, sample_interval=1, suffix='_preprocessed_accm7',
@@ -103,7 +103,7 @@ class MultiSeqTrainingDataset(data.Dataset):
         """
         Args:
             sequences: dict, 同 MultiSeqDataset
-            max_frames: int, 最大帧数限制（用于调试）
+            max_frames: int, 最大帧数限制
             cache_path: str, hard mining 缓存路径
         """
         super().__init__()
@@ -123,8 +123,7 @@ class MultiSeqTrainingDataset(data.Dataset):
         # 应用最大帧数限制
         if max_frames and max_frames < len(self.base_dataset):
             print(f"⚠️ 限制训练帧数: {len(self.base_dataset)} → {max_frames}")
-            # 这里需要截断 poses 和其他属性
-            # 简化实现：只截断 poses，实际使用时动态检查
+            # 截断 poses
             self.max_frames = max_frames
             self.poses = self.base_dataset.poses[:max_frames]
         else:

@@ -19,13 +19,12 @@ from tensorboardX import SummaryWriter
 import numpy as np
 from tqdm import tqdm
 
-# --- 导入模型 (V2 版本) ---
+# --- 导入模型 ---
 from model.fusion_model_rangerem_v2 import FusionPlaceModel
 
-# --- 导入数据集 (V2 版本) ---
+# --- 导入数据集 ---
 import datasets.fusion_dataset_v2 as ds_module 
 from datasets.multi_dataset_v2 import create_datasets_from_config, MultiSeqDataset, MultiSeqTrainingDataset
-# 注意：确保 fusion_dataset 中包含 evaluateResults 函数。
 
 def load_datasets_smart(opt, mode='train'):
     """
@@ -53,7 +52,7 @@ def load_datasets_smart(opt, mode='train'):
             dino_dim=opt.range_dim
         )
     
-    # 降级到单序列模式（向后兼容）
+    # 单序列模式
     print(f"📁 使用单序列模式加载数据集")
     
     if mode == 'train':
@@ -95,14 +94,14 @@ def load_datasets_smart(opt, mode='train'):
 def get_args():
     parser = argparse.ArgumentParser(description='FusionPlace (Stage A/B Training)')
     
-    # ===== 新增：阶段选择 =====
+    # ===== 阶段选择 =====
     parser.add_argument('--stage', type=str, default='B', choices=['A', 'B'],
                         help='Training stage: A=BEV only, B=BEV+Range fusion')
     
     parser.add_argument('--mode', type=str, default='test', help='Mode', choices=['train', 'test', 'val'])
     parser.add_argument('--dataset_root', type=str, default='/mnt/kaiyan/datasets/SNAIL', help='Snail 数据集根目录')
     
-    # 序列设置 (单序列模式，向后兼容)
+    # 序列设置（单序列模式）
     parser.add_argument('--train_seq', type=str, default='', help='训练序列（单序列模式）')
     parser.add_argument('--val_db_seq', type=str, default='', help='验证数据库（单序列模式）')
     parser.add_argument('--val_q_seq', type=str, default='', help='验证查询（单序列模式）')
@@ -111,7 +110,7 @@ def get_args():
     parser.add_argument('--dataset_config', type=str, default='configs/dataset_splits_test.json', 
                        help='数据集配置文件路径（如 configs/dataset_splits.json）')
 
-    # 模型参数 (保留代码1的设置)
+    # 模型参数
     parser.add_argument('--bev_path', type=str, default='runs/fusion_Feb14_17-38-13!/model_best.pth.tar')
     parser.add_argument('--load_from', type=str, default='runs/fusion_Feb15_14-42-59!/model_best.pth.tar', help='恢复训练或测试的模型路径')
     parser.add_argument('--cachePath', type=str, default='./cache/fusion_integrated4/')
@@ -126,7 +125,7 @@ def get_args():
     parser.add_argument('--disable_gated_fusion', action='store_true',
                         help='关闭 G-CAF 门控融合，回退到固定 0.1 残差融合')
     
-    # 训练参数 (来自代码2)
+    # 训练参数
     parser.add_argument('--batchSize', type=int, default=1, help='训练批量') 
     parser.add_argument('--cacheBatchSize', type=int, default=4, help='缓存/推理批量')
     parser.add_argument('--nEpochs', type=int, default=20, help='训练轮数')
@@ -141,7 +140,7 @@ def get_args():
     return opt
 
 class TripletLoss(nn.Module):
-    """三元组损失 (来自代码2)"""
+    """三元组损失"""
     def __init__(self):
         super(TripletLoss, self).__init__()
         self.margin = 0.3
@@ -155,15 +154,12 @@ class TripletLoss(nn.Module):
 def collate_fn_wrapper(batch):
     """
     为了兼容 FusionDataset 的输出格式 (bevs, ranges, indices) 
-    我们需要确保它能适配代码2风格的训练循环
+    适配当前训练循环的数据打包格式
     """
-    # 假设 fusion_dataset.collate_fn 已经存在，如果不存在，使用代码1的逻辑
+    # 使用数据集模块提供的 collate_fn
     batch = list(filter(lambda x: x is not None, batch))
     if len(batch) == 0: return None, None, None, None
-    
-    # 训练模式下，Dataset通常返回 (query, pos, neg, indices)
-    # 如果 FusionDataset 尚未实现 Hard Mining 的输出格式，这里可能需要调整
-    # 这里假设我们正在使用类似 bevdata_dataset 的 TrainingDataset 结构
+
     return ds_module.collate_fn(batch) 
 
 def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
@@ -171,7 +167,7 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
     # 确保 cachePath 存在
     if not exists(opt.cachePath): makedirs(opt.cachePath)
 
-    # === Hard Mining Cache 构建 (来自代码2) ===
+    # === Hard Mining Cache 构建 ===
     if epoch >= 5: # 可以设置晚一点开启 Hard Mining
         print(f'====> Epoch {epoch}: 构建硬样本挖掘特征缓存')
         train_set.mining = False 
@@ -179,7 +175,7 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
         
     # 1. 打开 HDF5 文件
         with h5py.File(train_set.cache, mode='w') as h5:
-            h5feat = None  # <--- [关键] 先不创建，等数据来了再说
+            h5feat = None
             
             # 2. 定义 DataLoader (注意使用 collate_fn_inference)
             train_loader = DataLoader(
@@ -216,7 +212,7 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
                         dino_global = dino_global.to(device) if dino_global is not None else None
                         res = model(bevs, ranges, dino_global=dino_global)
                     
-                    # 兼容性处理：如果返回的是 tuple (out1, local, global)，取最后一个
+                    # 兼容 tuple 返回值
                     if isinstance(res, tuple): res = res[-1]
                     
                     # 转为 numpy
@@ -248,7 +244,7 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
     model.train()
     criterion = TripletLoss().to(device)
 
-    # 这里的循环假设 Dataset 返回 (Query, Pos, Neg, Indices)
+    # 训练循环
     for iteration, (query, positives, negatives, indices) in enumerate(train_loader):
         # 解包双模态数据（支持单模或双模）
         if isinstance(query, (tuple, list)):
@@ -287,7 +283,7 @@ def train_epoch(epoch, model, train_set, opt, device, writer, optimizer):
 
         optimizer.zero_grad()
         loss = 0.0
-        # 计算 Loss (与代码2一致)
+        # 计算 Loss
         num_negs_per_q = n_bev.shape[0] // B
         for i in range(B):
             max_loss = torch.max(criterion(global_descs_Q[i], global_descs_P[i], 
@@ -341,12 +337,12 @@ def infer_fusion(eval_set, model, opt, device):
 
 
 # ==============================================================================
-# [新增] 聚类初始化函数 (完全复刻旧代码逻辑，但适配 Fusion 架构)
+# 聚类初始化函数
 # ==============================================================================
 def getClusters(cluster_set, opt, model, device):
     """
     使用 K-Means 初始化 NetVLAD 的聚类中心。
-    逻辑源自源代码，已适配 FusionPlaceModel 和 FusionDataset。
+    用于初始化 NetVLAD 的聚类中心。
     """
     n_descriptors = 10000  # 目标：凑够 10,000 个特征点
     n_per_image = 25       # 每张图只取 25 个点 (和旧代码一致)
@@ -418,7 +414,7 @@ def getClusters(cluster_set, opt, model, device):
 
         # 4. 执行 K-Means (FAISS)
         print('====> [Init] 开始 K-Means 聚类 (这可能需要几分钟)...')
-        # 使用 GPU 加速 (如果显存不够报错，把 gpu=True 改为 gpu=False)
+        # 使用 GPU 加速（显存不足可设置 gpu=False）
         kmeans = faiss.Kmeans(feat_dim, 64, niter=100, verbose=True, gpu=True) 
         descriptors = h5.get("descriptors")[...]
         kmeans.train(descriptors)
@@ -452,11 +448,11 @@ if __name__ == "__main__":
     print(f"====> Cache Directory: {opt.cachePath}")
     print(f"====> Centroids File:  {opt.centroids_path}")
     
-    # 1. 初始化模型 (根据 stage 选择)
+    # 初始化模型
     print(f'===> 加载 FusionPlaceModel (Stage {opt.stage})')
     model = FusionPlaceModel(
         bev_path=opt.bev_path,
-        stage=opt.stage,  # 关键：传入 stage 参数
+        stage=opt.stage,
         freeze_backbones=False,
         vision_dim=opt.range_dim,
         enable_semantic_fusion=opt.enable_semantic_fusion,
@@ -465,7 +461,7 @@ if __name__ == "__main__":
     model = model.to(device)
     
     # ==============================================================================
-    # [修改] 智能初始化逻辑
+    # 智能初始化逻辑
     # ==============================================================================
     if opt.mode == 'train':
             log_dir = join(opt.runsPath, f"fusion_{datetime.now().strftime('%b%d_%H-%M-%S')}")
@@ -477,8 +473,7 @@ if __name__ == "__main__":
                     print(f"✅ 检测到现有的聚类中心文件: {opt.centroids_path}，正在直接加载...")
                     with h5py.File(opt.centroids_path, mode='r') as h5:
                         centroids = h5.get("centroids")[...]
-                        # 注意：NetVLAD 初始化通常还需要特征描述符来计算 scale (b)
-                        # 如果你的 h5 文件里没存 descriptors，可以在 getClusters 存一下
+                        # NetVLAD 初始化需要特征描述符
                         descriptors = h5.get("descriptors")[...] 
                     print("🚀 聚类中心加载完毕。")
                 else:
@@ -490,7 +485,7 @@ if __name__ == "__main__":
                     )
                     centroids, descriptors = getClusters(cluster_dataset, opt, model, device)
                     
-                    # [新增] 将聚类结果持久化保存，下次直接用
+                    # 将聚类结果持久化保存
                     if not exists(os.path.dirname(opt.centroids_path)): 
                         makedirs(os.path.dirname(opt.centroids_path))
                     with h5py.File(opt.centroids_path, mode='w') as h5:

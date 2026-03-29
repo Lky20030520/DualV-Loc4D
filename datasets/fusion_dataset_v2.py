@@ -15,12 +15,10 @@ import random
 
 def get_transforms():
     bev_tf = transforms.Compose([
-        transforms.Resize((256, 256)),  # <-- 核心修改：强制缩放到 256x256
-        # 注意：这里不需要 ToTensor 或 Normalize，因为我们在 __getitem__ 里已经手动做了
+        transforms.Resize((256, 256)),
     ])
     
     
-    # Range 图保持不变
     range_tf = transforms.Compose([
         transforms.Resize((70, 518)),# interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
@@ -32,25 +30,6 @@ def get_transforms():
     ])
     return bev_tf, range_tf, cam_tf 
 
-
-# 在 get_transforms 中添加 normalize 定义
-# def get_transforms():
-#     # 定义通用的 normalize
-#     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-#                                      std=[0.229, 0.224, 0.225])
-
-#     bev_tf = transforms.Compose([
-#         transforms.Resize((256, 256)),
-#         # 注意：transforms.Normalize 期望输入是 Tensor，所以放在 Resize 后
-#         normalize 
-#     ])
-
-#     range_tf = transforms.Compose([
-#         transforms.Resize((70, 518)),
-#         transforms.ToTensor(),
-#         normalize
-#     ])
-#     return bev_tf, range_tf
 
 BEV_TF, RANGE_TF, CAM_TF = get_transforms()
 
@@ -165,10 +144,7 @@ class FusionInferDataset(data.Dataset):
         if detected_dim is not None:
             self.dino_dim = detected_dim
         
-        # [修改 1] 适配你的截图路径结构
         # 优先直接找 dataset_root/seq
-        # dataset_root = "./datasets/snail_old"
-        # seq = "if_20231208_4"
         base_dir = join(dataset_root, seq)
         
         # 兼容性：如果找不到，再试试 radar/seq
@@ -206,7 +182,7 @@ class FusionInferDataset(data.Dataset):
         range_db.sort(key=lambda x: x['ts'])
         range_timestamps = np.array([x['ts'] for x in range_db])
         
-        # [修改 2] 使用最近邻匹配 (Nearest Neighbor Matching)
+        # 使用最近邻匹配
         self.pairs = []
         match_count = 0
         
@@ -248,7 +224,7 @@ class FusionInferDataset(data.Dataset):
         self.pairs.sort(key=lambda x: x['ts'])
         self.pairs = self.pairs[::self.sample_inteval]
         
-        # 加载 Pose (逻辑不变)
+        # 加载 Pose
         self.poses = self._load_poses()
 
     def _load_poses(self):
@@ -271,7 +247,7 @@ class FusionInferDataset(data.Dataset):
             idx = np.argmin(np.abs(sorted_pose_ts_np - img_ts))
             closest_ts = sorted_pose_ts_np[idx]
             
-            # 也就是如果 Pose 也没对齐，这里会找最近的
+            # Pose 使用最近邻对齐
             pose_file = pose_map[closest_ts]
             try:
                 with open(pose_file, 'r') as f:
@@ -287,7 +263,7 @@ class FusionInferDataset(data.Dataset):
     
     
     def __getitem__(self, index):
-            # 1. 获取数据项 (注意：FusionDataset 使用 self.pairs 字典列表)
+            # 1. 获取数据项
             item = self.pairs[index]
             
             # 2. 获取 BEV 图片路径
@@ -327,7 +303,7 @@ class FusionInferDataset(data.Dataset):
                     cam_img = Image.open(cam_path).convert('RGB')
                     cam_tensor = CAM_TF(cam_img)
                 else:
-                    # 兜底空图，避免 batch 中断
+                    # 缺失相机图像时使用空张量
                     cam_tensor = torch.zeros((3, 518, 518), dtype=torch.float32)
                 return bev_tensor, range_tensor, cam_tensor, index
             
@@ -597,7 +573,7 @@ def collate_fn(batch):
         p_dinos = torch.stack([x[2] for x in positives])
     
     # 5. 堆叠 Negatives
-    # 注意：每个样本有多个负样本，所以这里用 cat 把它们串起来
+    # 每个样本有多个负样本，这里用 cat 合并
     n_bevs = torch.cat([x[0] for x in negatives])
     n_ranges = torch.cat([x[1] for x in negatives])
     if has_dino:

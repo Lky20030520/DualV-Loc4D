@@ -123,7 +123,6 @@ def setup_seed(seed):
 def getClusters(cluster_set, opt, model, device):
     """
     使用 K-Means 初始化 NetVLAD 的聚类中心。
-    逻辑源自 main_fusion_rangerem.py，已适配 FusionPlaceModel 和 FusionDataset。
     """
     n_descriptors = 10000  # 目标：凑够 10,000 个特征点
     n_per_image = 25       # 每张图只取 25 个点
@@ -515,7 +514,7 @@ def main():
         centroids_path = join(opt.cache_dir, 'centroids_init.hdf5')
         
         if opt.load_from and exists(opt.load_from):
-            # 如果从 checkpoint 恢复，跳过聚类初始化
+            # 从 checkpoint 恢复时跳过聚类初始化
             if isfile(opt.load_from):
                 ckpt_path = opt.load_from
             else:
